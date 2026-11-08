@@ -33,6 +33,28 @@ PRODUCT_COPY_FILES += \
     frameworks/av/services/audiopolicy/config/bluetooth_audio_policy_configuration_7_0.xml:$(TARGET_COPY_OUT_VENDOR)/etc/bluetooth_audio_policy_configuration.xml
 # --- end of item 5 ------------------------------------------------------------------------------
 
+# Hardware video decoders (2026-11-08). The Exynos OMX core (libExynosOMX_Core.so, a blob) loads
+# its components only from the hard-coded /vendor/lib/omx/, but the gts2-common blobs and the
+# openmax source modules install to /system/lib/omx/, so IOmx listed no nodes and every video
+# was decoded in software. Now:
+# - AVC and MPEG4 (MFC): the gts2-common blobs, copied to /vendor/lib/omx/ below;
+# - HEVC (separate HEVC IP, exynos-hevc-dec) and VP8 (MFC): the components built from
+#   hardware/samsung_slsi/openmax, installed to vendor by patches/hardware_samsung_slsi_openmax/0001
+#   (the gts2-common blobs of these are an Android 9 build the resource manager rejects);
+# - libExynosOMX_Resourcemanager built from source: the blob reads the components' codecType at
+#   the wrong offset and refused every node (patches/vendor_samsung/0001 keeps the blob out).
+# media_codecs.xml: patches/gts2-common/0010 adds OMX.Exynos.hevc.dec and hides
+# OMX.Exynos.avc.dec.secure (Widevine L1 decryption into it fails). No VP9 hardware on the 5433.
+# Tested on the device: logs/omx-test2-20261108/, omx-test3-hevc-20261108/, omx-test4-vp8-20261108/.
+PRODUCT_PACKAGES += \
+    libExynosOMX_Resourcemanager \
+    libOMX.Exynos.HEVC.Decoder \
+    libOMX.Exynos.VP8.Decoder
+
+PRODUCT_COPY_FILES += \
+    vendor/samsung/gts2-common/proprietary/system/lib/omx/libOMX.Exynos.AVC.Decoder.so:$(TARGET_COPY_OUT_VENDOR)/lib/omx/libOMX.Exynos.AVC.Decoder.so \
+    vendor/samsung/gts2-common/proprietary/system/lib/omx/libOMX.Exynos.MPEG4.Decoder.so:$(TARGET_COPY_OUT_VENDOR)/lib/omx/libOMX.Exynos.MPEG4.Decoder.so
+
 # Overlay
 DEVICE_PACKAGE_OVERLAYS += \
 	device/samsung/gts210ltexx/overlay

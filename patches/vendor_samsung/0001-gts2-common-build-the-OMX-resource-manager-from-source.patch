@@ -1,0 +1,39 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] gts2-common: build the OMX resource manager from source
+
+The Exynos OMX core loads its components from /vendor/lib/omx/, and every
+component then asks libExynosOMX_Resourcemanager for a decoder slot. The
+resource manager blob of gts2-common reads the component's codecType at
+offset 0x18 of the base component and accepts only 1..5; the component
+blobs (libOMX.Exynos.AVC.Decoder.so, ...MPEG4.Decoder.so) store it at
+0x1c. The blobs are from different BSP generations, so every node failed
+with "Exynos_OMX_Get_Resource()" / InsufficientResources and no hardware
+decoder was available.
+
+The resource manager built from hardware/samsung_slsi/openmax reads 0x1c,
+has the same soname and NEEDED set and exports every symbol the
+components import (the blob's three extra exports, DataSpaceToColorSpace,
+Mmap and Munmap, are imported by nothing). Leave the blob out of
+PRODUCT_COPY_FILES so the source-built module (LOCAL_PROPRIETARY_MODULE)
+is installed in its place. The OMX core stays the blob.
+
+Tested on the SM-T815 on 2026-11-08 by swapping the library on the
+device: OMX.Exynos.avc.dec, .avc.dec.secure and mpeg4.dec allocate;
+1080p AVC decodes at about 15 ms per frame against 55 ms in software;
+the secure decoder configures and starts with a Widevine L1 MediaCrypto
+("DRM instance is opened"). Logs: logs/omx-test2-20261108/.
+---
+diff --git a/gts2-common/gts2-common-vendor.mk b/gts2-common/gts2-common-vendor.mk
+index b0e20bb..e268787 100644
+--- a/gts2-common/gts2-common-vendor.mk
++++ b/gts2-common/gts2-common-vendor.mk
+@@ -19,4 +19,8 @@ PRODUCT_PACKAGES += libGLES_mali
+ include vendor/samsung/gts2-common/find-vendor-blobs.mk
+ 
+ # Proprietary blobs
+-PRODUCT_COPY_FILES += $(call find-vendor-blobs,vendor/samsung/gts2-common/proprietary)
++# libExynosOMX_Resourcemanager.so is built from hardware/samsung_slsi/openmax instead: the blob
++# reads the OMX component's codecType at offset 0x18, the Exynos OMX component blobs write it at
++# 0x1c (another BSP generation), so every component failed with InsufficientResources.
++PRODUCT_COPY_FILES += $(filter-out %/libExynosOMX_Resourcemanager.so, \
++    $(call find-vendor-blobs,vendor/samsung/gts2-common/proprietary))

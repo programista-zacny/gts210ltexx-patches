@@ -1,0 +1,47 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] openmax: install the HEVC and VP8 decoders to vendor
+
+The Exynos OMX core (libExynosOMX_Core.so) loads components only from
+/vendor/lib/omx/. libOMX.Exynos.HEVC.Decoder and libOMX.Exynos.VP8.Decoder
+have LOCAL_MODULE_RELATIVE_PATH omx but no LOCAL_VENDOR_MODULE, so they
+would install to /system/lib/omx/, where the core never looks (and where
+the incompatible Android 9 blobs of the same names are copied by
+gts2-common).
+
+HEVC drives the separate HEVC decoder IP of the Exynos 5433
+(exynos-hevc-dec, /dev/video10). Tested on the SM-T815 on 2026-11-08 by
+installing the build-10 object to /vendor/lib/omx/: firmware "HEVC v1.0"
+loads, 1080p decodes at about 15 ms per frame against 64 ms for
+c2.android.hevc.decoder on a high-entropy clip, at about a sixth of the
+CPU time. The HEVC driver has no secure node, so there is no secure HEVC
+decoder. Logs: logs/omx-test3-hevc-20261108/.
+
+VP8 runs on the MFC v8 (s5p-mfc-dec, "Dec input codec(14): VP8"). Tested
+the same way: 1080p at 14-15 ms per frame against 45-53 ms for
+c2.android.vp8.decoder, about a third of the CPU time, identical output,
+two decoders at once at 54 fps each. Logs: logs/omx-test4-vp8-20261108/.
+---
+diff --git a/component/video/dec/hevc/Android.mk b/component/video/dec/hevc/Android.mk
+index a37953f..eba0924 100644
+--- a/component/video/dec/hevc/Android.mk
++++ b/component/video/dec/hevc/Android.mk
+@@ -10,6 +10,7 @@ LOCAL_SRC_FILES := \
+ LOCAL_PRELINK_MODULE := false
+ LOCAL_MODULE := libOMX.Exynos.HEVC.Decoder
+ LOCAL_MODULE_RELATIVE_PATH := omx
++LOCAL_VENDOR_MODULE := true
+ 
+ LOCAL_CFLAGS := \
+     -Wno-enum-conversion \
+diff --git a/component/video/dec/vp8/Android.mk b/component/video/dec/vp8/Android.mk
+index 834a9c2..3888514 100644
+--- a/component/video/dec/vp8/Android.mk
++++ b/component/video/dec/vp8/Android.mk
+@@ -10,6 +10,7 @@ LOCAL_SRC_FILES := \
+ LOCAL_PRELINK_MODULE := false
+ LOCAL_MODULE := libOMX.Exynos.VP8.Decoder
+ LOCAL_MODULE_RELATIVE_PATH := omx
++LOCAL_VENDOR_MODULE := true
+ 
+ LOCAL_CFLAGS := \
+     -Wno-enum-conversion \

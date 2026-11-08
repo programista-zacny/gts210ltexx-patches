@@ -1,0 +1,76 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] media_codecs: add the HEVC decoder, hide the secure AVC decoder
+
+Two changes to the codec list, in one patch because both touch
+media_codecs.xml (prepare-tree.sh checks each patch on its own).
+
+Add OMX.Exynos.hevc.dec, the source-built component for the HEVC decoder
+IP of the Exynos 5433 (the openmax patch installs it to /vendor/lib/omx/).
+Limits are those of the HEVC IP: up to 1920x1088, 1080p60 in macroblocks
+per second. No .secure entry: the kernel's HEVC driver registers no secure
+node. Tested on the SM-T815 on 2026-11-08 with this entry on the device:
+apps list OMX.Exynos.hevc.dec before c2.android.hevc.decoder and decode
+through it. Logs: logs/omx-test3-hevc-20261108/.
+
+Hide OMX.Exynos.avc.dec.secure (commented out, not removed). It configures
+and opens the secure MFC node, but Widevine L1 decryption into it fails:
+Samsung's liboemcrypto rejects the secure buffer ("wv_dash: Invalid secure
+handle", then "WVCdm: Decrypt error", ERROR_DRM_UNKNOWN). The component
+supports neither allocateNativeHandle nor metadata mode, so ACodec falls
+back to the legacy secure buffer, which this liboemcrypto does not accept.
+Apps that see a secure decoder open an L1 session first: Prime Video
+failed and fell back (once to a black screen until replayed), HBO Max
+failed and fell back to L3 with the non-secure hardware decoder. Without
+the entry they go to L3 directly.
+---
+diff --git a/configs/media/media_codecs.xml b/configs/media/media_codecs.xml
+index 6151b4d..a2e8b9b 100644
+--- a/configs/media/media_codecs.xml
++++ b/configs/media/media_codecs.xml
+@@ -123,6 +123,7 @@ Only the three quirks included above are recognized at this point:
+             <Limit name="concurrent-instances" max="16"/>
+             <Feature name="adaptive-playback" />
+         </MediaCodec>
++        <!-- Hidden (gts210ltexx, 2026-11-08): Widevine L1 decrypt into this decoder fails ("Invalid secure handle" in liboemcrypto); apps that see it try L1 first and fail.
+         <MediaCodec name="OMX.Exynos.avc.dec.secure" type="video/avc" >
+             <Quirk name="requires-allocate-on-input-ports" />
+             <Quirk name="requires-allocate-on-output-ports" />
+@@ -136,6 +137,19 @@ Only the three quirks included above are recognized at this point:
+             <Limit name="concurrent-instances" max="2"/>
+             <Feature name="adaptive-playback" />
+             <Feature name="secure-playback" required="true" />
++        </MediaCodec> -->
++        <MediaCodec name="OMX.Exynos.hevc.dec" type="video/hevc" >
++            <Quirk name="requires-allocate-on-input-ports" />
++            <Quirk name="requires-allocate-on-output-ports" />
++            <Quirk name="decoder-ignores-streamcorrupt-error" />
++            <Quirk name="video-controller-check-enable" />
++            <Limit name="size" min="64x64" max="1920x1088" />
++            <Limit name="alignment" value="2x2" />
++            <Limit name="block-size" value="16x16" />
++            <Limit name="blocks-per-second" min="1" max="489600" />
++            <Limit name="bitrate" range="1-50000000" />
++            <Limit name="concurrent-instances" max="4"/>
++            <Feature name="adaptive-playback" />
+         </MediaCodec>
+         <MediaCodec name="OMX.Exynos.vp8.dec" type="video/x-vnd.on2.vp8" >
+             <Quirk name="requires-allocate-on-input-ports" />
+diff --git a/configs/media/media_codecs_performance.xml b/configs/media/media_codecs_performance.xml
+index 55bca84..26aa395 100644
+--- a/configs/media/media_codecs_performance.xml
++++ b/configs/media/media_codecs_performance.xml
+@@ -100,12 +100,13 @@
+             <Limit name="measured-frame-rate-1280x720" range="25-45" />
+             <Limit name="measured-frame-rate-1920x1080" range="10-20" />
+         </MediaCodec>        
++        <!-- Hidden with the codec entry in media_codecs.xml.
+         <MediaCodec name="OMX.Exynos.avc.dec.secure" type="video/avc" update="true" >
+             <Limit name="measured-frame-rate-320x240" range="170-300" />
+             <Limit name="measured-frame-rate-720x480" range="130-250" />
+             <Limit name="measured-frame-rate-1280x720" range="130-250" />
+             <Limit name="measured-frame-rate-1920x1080" range="100-180" />
+-        </MediaCodec>
++        </MediaCodec> -->
+         <MediaCodec name="OMX.Exynos.vp8.dec" type="video/x-vnd.on2.vp8" update="true" >
+             <Limit name="measured-frame-rate-320x240" range="620-648" />
+             <Limit name="measured-frame-rate-720x480" range="720-720" />
