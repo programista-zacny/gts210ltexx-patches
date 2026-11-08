@@ -2,7 +2,7 @@
 # Downloads the two prebuilt APKs that are not kept in git into the places the build expects,
 # and verifies them: the sha256 always, the signer certificate when apksigner is available.
 #   device/gts210ltexx/prebuilt/AuroraStore/AuroraStore.apk   Aurora Store 4.8.4
-#   tree-overrides/vendor/partner_gms/GmsCore/GmsCore.apk     microG GmsCore 0.3.16.252432
+#   tree-overrides/vendor/partner_gms/GmsCore/GmsCore.apk     microG GmsCore 0.3.16.1.252432
 # A file that is already there with the right sha256 is not downloaded again.
 # Usage: scripts/fetch-prebuilts.sh [--force]      (--force: download even if present)
 # apksigner is looked for in this order: $APKSIGNER, the LineageOS tree's prebuilt JDK with
@@ -20,7 +20,7 @@ esac
 # name | path under the project root | URL | sha256 | signer certificate SHA-256
 PREBUILTS=(
     "Aurora Store 4.8.4 (versionCode 76)|device/gts210ltexx/prebuilt/AuroraStore/AuroraStore.apk|https://f-droid.org/repo/com.aurora.store_76.apk|fd9c75d90d0f4a7c132b9b4a5a2cf1992a45e03b8d8ff988b7dcfbc0db2c4d11|5c83c7672b929955dc0a1db89a5e6ae4389e2eae7ec939956041694e5815f532"
-    "microG GmsCore 0.3.16.252432 (versionCode 252432032)|tree-overrides/vendor/partner_gms/GmsCore/GmsCore.apk|https://github.com/microg/GmsCore/releases/download/v0.3.16.252432/com.google.android.gms-252432032.apk|169a53df557e6577322e7cc8aa3389cb82b3d6408dd162433cc94f1d084a73d4|9bd06727e62796c0130eb6dab39b73157451582cbd138e86c468acc395d14165"
+    "microG GmsCore 0.3.16.1.252432 (versionCode 252432033)|tree-overrides/vendor/partner_gms/GmsCore/GmsCore.apk|https://github.com/microg/GmsCore/releases/download/v0.3.16.1.252432/com.google.android.gms-252432033.apk|5338d8a1141e8aa5845d64a41a39a666139fbe2e2499eead7b1f2ecd69980ccb|9bd06727e62796c0130eb6dab39b73157451582cbd138e86c468acc395d14165"
 )
 
 # apksigner as a command array, or empty when none is found
