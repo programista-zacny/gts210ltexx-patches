@@ -1,0 +1,59 @@
+# Runtime tuning specific to gts210ltexx. Installed to /vendor/etc/init, which init parses
+# without an import line.
+
+on post-fs
+    # Read-ahead on the internal eMMC. Measured on the device (2026-11-06, screen on, cold cache):
+    # 256 MB sequential read 1.07 s at 1024 KB against 1.86-1.98 s at the kernel's 256 KB, and
+    # about 7% faster reads of the system app/framework files; 2048 KB gave nothing more.
+    write /sys/block/mmcblk0/queue/read_ahead_kb 1024
+
+on init
+    # CPU sets (kernel CONFIG_CPUSETS with the cpuset patches in patches/kernel). Exynos 5433:
+    # cpu0-3 are the Cortex-A53 "little" cores, cpu4-7 the Cortex-A57 "big" ones.
+    #
+    # By the time this runs, init.rc has created every set below as a copy of the root set
+    # (0-7), and gts2-common's init.samsung.rc has written its own masks into four of them
+    # (top-app 0-7, foreground 0-2,4-7, background 0-1, system-background 0-2). Both are "on init"
+    # actions that init parses before /vendor/etc/init, so the values here are the ones that stay.
+    #
+    # Every set contains cpu0. The hotplug governor (dm_hotplug) takes cores offline, with the
+    # screen off all but cpu0, and cpu0 itself cannot go offline on this kernel: the governor
+    # never asks for it (its loops stop at cpu1 and it keeps at least one core), and the ARM code
+    # refuses anyway (the Exynos SMP operations have no cpu_disable hook, so
+    # platform_cpu_disable() in arch/arm/kernel/smp.c returns -EPERM for cpu 0). A set that has
+    # cpu0 therefore always has an online CPU; the kernel takes the other cores out of a set while
+    # they are offline and puts them back when they return.
+    #
+    # Foreground work may use all cores.
+    write /dev/cpuset/top-app/cpus 0-7
+    write /dev/cpuset/foreground/cpus 0-7
+    write /dev/cpuset/foreground_window/cpus 0-7
+    write /dev/cpuset/camera-daemon/cpus 0-7
+    # system-background also holds SurfaceFlinger's main and RenderEngine threads (SFMainPolicy
+    # and SFRenderEnginePolicy in task_profiles.json). Without cpusets those threads could run on
+    # the big cores, so this set keeps all cores; narrowing it to 0-3 is a later option, to be
+    # taken only after measuring frame times.
+    write /dev/cpuset/system-background/cpus 0-7
+    # Background apps and throttled tasks stay on the little cores.
+    # background: 0-3 leaves cached and background apps the whole little cluster; 0-1 (the value
+    # in init.samsung.rc) is the stricter choice that keeps two little cores free of them.
+    write /dev/cpuset/background/cpus 0-3
+    write /dev/cpuset/restricted/cpus 0-3
+
+on early-init
+    # Let the kernel read firmware files itself. Its built-in search covers only /lib/firmware,
+    # which does not exist in this image, so every request_firmware() was passed to ueventd with
+    # a uevent. That includes the copies the kernel takes at the start of every suspend attempt
+    # (fw_pm_notify in drivers/base/firmware_class.c) of the files a driver has loaded before:
+    # fimc_is_fw2_4h5.bin and setfile_4h5.bin once the rear camera has been opened, setfile_6b2.bin
+    # after the front camera, mfc_fw.bin and hevc_fw.bin after hardware video. Each of those
+    # uevents wakes the health service: its uevent socket is wakeup-capable and the filter that
+    # limits it to power_supply events is an eBPF program, which this 3.10 kernel cannot load.
+    # The wakeup arrives while tasks are being frozen and the attempt is aborted ("last active
+    # wakeup source: eventpoll"; 61 of 67 attempts in logs/sleep-check-20261106-182141).
+    #
+    # With the path set the kernel opens the file directly and sends no uevent. When it cannot
+    # open a file it still falls back to ueventd, as before. /vendor/firmware is the only firmware
+    # directory in the image and the one ueventd served these files from. The value must not end
+    # in a newline (init's write adds none).
+    write /sys/module/firmware_class/parameters/path /vendor/firmware

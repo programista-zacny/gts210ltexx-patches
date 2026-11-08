@@ -1,0 +1,27 @@
+# Prebuilt APKs: downloaded and verified by scripts/fetch-prebuilts.sh, never committed
+/device/gts210ltexx/prebuilt/AuroraStore/AuroraStore.apk
+/tree-overrides/vendor/partner_gms/GmsCore/GmsCore.apk
+*.apk.part
+
+# Own signing keys: never committed (see "Own signing keys" in README.md)
+/keys/
+*.pk8
+*.x509.pem
+
+# Checkouts and build output that live inside this directory (see "Build" in README.md)
+/lineage/
+/patches-rinando/
+/vendor/
+/logs/
+
+# Local working files
+/env.sh
+/gitconfig
+/bin/
+/dl/
+/releases/
+/staging/
+/patches-retired/
+/manifests/snapshots/
+/publish/
+/scripts/dk.sh

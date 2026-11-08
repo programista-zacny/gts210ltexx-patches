@@ -1,0 +1,110 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] Freezer: support the cgroup v1 freezer
+
+Freezer.isFreezerSupported() opens the file of the FreezerState
+attribute and expects cgroup v2's cgroup.freeze, which reads "0" or
+"1". On kernels without cgroup v2 the task profiles of this tree use the
+v1 freezer instead (LOS-24.0 android_system_core patch 0002): frozen
+processes are moved into /dev/freezer/frozen, a cgroup whose
+freezer.state is set to FROZEN once by init, and FreezerState names
+that file. It reads "FROZEN" (or "FREEZING" while tasks are on their way
+into the refrigerator), so the check failed with "Unexpected value in
+cgroup.freeze" and the app freezer stayed off.
+
+When the attribute is a v1 freezer.state file, accept a state that
+starts with 'F' and require a second thing: the framework kills frozen
+processes without thawing them, and a stock v1 freezer keeps a killed
+task frozen, memory and all, until its cgroup is thawed. Kernels that
+let frozen tasks die say so in freezer.killable next to freezer.state
+(kernel patch 0021 of this project; Android 11's kernels had the same
+file). If the file is missing or does not read 1 the freezer stays off.
+
+The remaining checks are unchanged: BINDER_GET_FROZEN_INFO has to work
+and the Frozen and Unfrozen profiles have to be applicable, which for
+the v1 profiles means that system_server can write to the cgroup.procs
+files of /dev/freezer/frozen and /dev/freezer.
+
+Nothing else in the framework needs the v2 file for freezing and
+thawing: Process.setProcessFrozen() only applies the Frozen and
+Unfrozen profiles. Two places still assume cgroup v2 and keep failing
+the way they do without a v2 hierarchy: Process.freezeCgroupUid(), used
+by ProcessList when it kills the processes of a package, now throws and
+logs "Unable to freeze cgroup uid" where the empty profile used to
+succeed without doing anything, and Process.isProcessFrozen() ("am
+isfrozen") always answers false. Use "dumpsys activity" (section
+"Apps frozen") or /dev/freezer/frozen/cgroup.procs to see what is
+frozen.
+
+Syntax-checked outside the build with stubbed headers; not built with
+Soong, not run.
+
+[combined set, 2026-11-06] Header only: the kernel patch number above is
+that of the combined set (staging/backport-freezer: 0025). The diff is
+unchanged.
+---
+ services/core/jni/com_android_server_am_Freezer.cpp | 38 +++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 1 deletion(-)
+
+diff --git a/services/core/jni/com_android_server_am_Freezer.cpp b/services/core/jni/com_android_server_am_Freezer.cpp
+index e9a99f0..6322f4f 100644
+--- a/services/core/jni/com_android_server_am_Freezer.cpp
++++ b/services/core/jni/com_android_server_am_Freezer.cpp
+@@ -23,6 +23,7 @@
+ #include <unistd.h>
+ 
+ #include <android-base/logging.h>
++#include <android-base/strings.h>
+ #include <android-base/unique_fd.h>
+ #include <binder/IPCThreadState.h>
+ #include <nativehelper/JNIHelp.h>
+@@ -45,6 +46,37 @@ jint freezeBinder(JNIEnv* env, jobject, jint pid, jboolean freeze, jint timeout_
+     return retVal;
+ }
+ 
++// Cgroup v1 freezer (kernels without cgroup v2). The FreezerState attribute is then the
++// freezer.state file of the cgroup that frozen processes are moved into, and reads "FROZEN"
++// (or "FREEZING" while tasks are on their way into the refrigerator) once init has set the
++// cgroup up. The framework kills frozen processes without thawing them first, which the v1
++// freezer only supports when the kernel says so in the cgroup's freezer.killable file.
++bool isLegacyFreezerUsable(const std::string& statePath, char state) {
++    if (state != 'F') {
++        ALOGE("Unexpected value in %s: %d", statePath.c_str(), state);
++        return false;
++    }
++
++    const size_t slash = statePath.rfind('/');
++    if (slash == std::string::npos) {
++        return false;
++    }
++    const std::string killablePath = statePath.substr(0, slash) + "/freezer.killable";
++    base::unique_fd fd(open(killablePath.c_str(), O_RDONLY | O_CLOEXEC));
++    if (fd < 0) {
++        ALOGE("Cannot open \"%s\": %s; frozen processes could not be killed, not using the "
++              "freezer", killablePath.c_str(), strerror(errno));
++        return false;
++    }
++    char killable;
++    if (::read(fd, &killable, 1) != 1 || killable != '1') {
++        ALOGE("Frozen processes are not killable according to %s, not using the freezer",
++              killablePath.c_str());
++        return false;
++    }
++    return true;
++}
++
+ jint getBinderFreezeInfo(JNIEnv *env, jobject, jint pid) {
+     uint32_t syncReceived = 0, asyncReceived = 0;
+ 
+@@ -83,7 +115,11 @@ bool isFreezerSupported(JNIEnv *env, jclass) {
+         ALOGI("Failed to read freezer state: %s", strerror(errno));
+         return false;
+     }
+-    if (state != '1' && state != '0') {
++    if (base::EndsWith(path, "/freezer.state")) {
++        if (!isLegacyFreezerUsable(path, state)) {
++            return false;
++        }
++    } else if (state != '1' && state != '0') {
+         ALOGE("Unexpected value in cgroup.freeze: %d", state);
+         return false;
+     }

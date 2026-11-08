@@ -1,0 +1,192 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] fs: add close_range() with CLOSE_RANGE_UNSHARE and
+ CLOSE_RANGE_CLOEXEC
+
+close_range(fd, max_fd, flags) closes every descriptor in [fd, max_fd],
+or with CLOSE_RANGE_CLOEXEC marks them close-on-exec instead;
+CLOSE_RANGE_UNSHARE first gives the caller a private descriptor table.
+
+bionic's posix_spawn() implements POSIX_SPAWN_CLOEXEC_DEFAULT with
+close_range(3, ~0U, CLOSE_RANGE_CLOEXEC) in the child and calls
+_exit(127) when that fails; it has no fallback. On this kernel the call
+is -ENOSYS, so every program started that way dies before exec. In
+Android 17 that is netd's TetherController (dnsmasq for tethering) and
+ClatCoordinator (clatd, 464xlat on IPv6-only mobile networks).
+
+Derived from upstream:
+  278a5fbaed89 "open: add close_range()"
+  60997c3d45d9 "close_range: add CLOSE_RANGE_UNSHARE"
+  582f1fb6b721 "fs, close_range: add flag CLOSE_RANGE_CLOEXEC"
+  9b5b872215fe "file: fix close_range() for unshare+cloexec" (the range
+               for the close-on-exec bitmap is clamped under file_lock)
+
+Adapted for 3.10:
+- 3.10 has no pick_file(); the range is closed with the existing
+  __close_fd(), one descriptor at a time, which takes file_lock itself
+  and returns -EBADF for unused slots.
+- CLOSE_RANGE_UNSHARE uses the existing unshare_files() instead of the
+  new unshare_fd(flags, max_fds, ...): the whole table is copied and
+  installed before the range is closed, where upstream copies only the
+  descriptors below the range when everything above is going away and
+  installs the copy afterwards. Same result for the caller, without
+  changing dup_fd().
+- Setting close-on-exec bits for slots that are not open is harmless
+  here as it is upstream: __alloc_fd() and do_dup2() set or clear the bit
+  for every descriptor they hand out, and do_close_on_exec() skips
+  empty slots.
+- The syscall lives in fs/file.c next to the helpers; nothing else needs
+  them here.
+- include/uapi/linux/close_range.h is new and added to the uapi Kbuild.
+
+The ARM table entry (436) and the cond_syscall() are in "ARM: extend the
+syscall table to 441 and wire up close_range and epoll_pwait2".
+
+Not compile-tested.
+---
+ fs/file.c                        | 82 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ include/linux/syscalls.h         |  2 ++
+ include/uapi/linux/Kbuild        |  1 +
+ include/uapi/linux/close_range.h | 10 ++++++++
+ 4 files changed, 95 insertions(+)
+
+diff --git a/fs/file.c b/fs/file.c
+index 9de2026..a1a0c7d 100644
+--- a/fs/file.c
++++ b/fs/file.c
+@@ -18,6 +18,8 @@
+ #include <linux/file.h>
+ #include <linux/fdtable.h>
+ #include <linux/bitops.h>
++#include <linux/bitmap.h>
++#include <linux/close_range.h>
+ #include <linux/interrupt.h>
+ #include <linux/spinlock.h>
+ #include <linux/rcupdate.h>
+@@ -609,6 +611,86 @@ out_unlock:
+ 	return -EBADF;
+ }
+ 
++static void __range_cloexec(struct files_struct *cur_fds,
++			    unsigned int fd, unsigned int max_fd)
++{
++	struct fdtable *fdt;
++
++	/* make sure we're using the correct maximum value */
++	spin_lock(&cur_fds->file_lock);
++	fdt = files_fdtable(cur_fds);
++	max_fd = min(max_fd, fdt->max_fds - 1);
++	if (fd <= max_fd)
++		bitmap_set(fdt->close_on_exec, fd, max_fd - fd + 1);
++	spin_unlock(&cur_fds->file_lock);
++}
++
++static void __range_close(struct files_struct *cur_fds,
++			  unsigned int fd, unsigned int max_fd)
++{
++	unsigned int cur_max;
++
++	rcu_read_lock();
++	cur_max = files_fdtable(cur_fds)->max_fds;
++	rcu_read_unlock();
++
++	/* cap to last valid index into fdtable */
++	max_fd = min(max_fd, cur_max - 1);
++
++	while (fd <= max_fd) {
++		/* -EBADF for a slot that is not in use; errors are ignored */
++		__close_fd(cur_fds, fd++);
++		cond_resched();
++	}
++}
++
++/**
++ * close_range() - Close all file descriptors in a given range.
++ *
++ * @fd:     starting file descriptor to close
++ * @max_fd: last file descriptor to close
++ * @flags:  CLOSE_RANGE_UNSHARE and/or CLOSE_RANGE_CLOEXEC
++ *
++ * This closes a range of file descriptors. All file descriptors
++ * from @fd up to and including @max_fd are closed, or, with
++ * CLOSE_RANGE_CLOEXEC, marked close-on-exec instead.
++ * Currently, errors to close a given file descriptor are ignored.
++ */
++SYSCALL_DEFINE3(close_range, unsigned int, fd, unsigned int, max_fd,
++		unsigned int, flags)
++{
++	struct files_struct *cur_fds = current->files;
++
++	if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
++		return -EINVAL;
++
++	if (fd > max_fd)
++		return -EINVAL;
++
++	if (flags & CLOSE_RANGE_UNSHARE) {
++		struct files_struct *displaced;
++		int ret;
++
++		/*
++		 * Gives us a private copy of the table if it is shared with
++		 * another task, and installs it as current->files.
++		 */
++		ret = unshare_files(&displaced);
++		if (ret)
++			return ret;
++		if (displaced)
++			put_files_struct(displaced);
++		cur_fds = current->files;
++	}
++
++	if (flags & CLOSE_RANGE_CLOEXEC)
++		__range_cloexec(cur_fds, fd, max_fd);
++	else
++		__range_close(cur_fds, fd, max_fd);
++
++	return 0;
++}
++
+ void do_close_on_exec(struct files_struct *files)
+ {
+ 	unsigned i;
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 094bc17..7f32131 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -491,6 +491,8 @@ asmlinkage long sys_creat(const char __user *pathname, umode_t mode);
+ asmlinkage long sys_open(const char __user *filename,
+ 				int flags, umode_t mode);
+ asmlinkage long sys_close(unsigned int fd);
++asmlinkage long sys_close_range(unsigned int fd, unsigned int max_fd,
++				unsigned int flags);
+ asmlinkage long sys_access(const char __user *filename, int mode);
+ asmlinkage long sys_vhangup(void);
+ asmlinkage long sys_chown(const char __user *filename,
+diff --git a/include/uapi/linux/Kbuild b/include/uapi/linux/Kbuild
+index 69e2ab6..e43a572 100644
+--- a/include/uapi/linux/Kbuild
++++ b/include/uapi/linux/Kbuild
+@@ -78,6 +78,7 @@ header-y += cciss_ioctl.h
+ header-y += cdrom.h
+ header-y += cgroupstats.h
+ header-y += chio.h
++header-y += close_range.h
+ header-y += cm4000_cs.h
+ header-y += cn_proc.h
+ header-y += coda.h
+diff --git a/include/uapi/linux/close_range.h b/include/uapi/linux/close_range.h
+new file mode 100644
+index 0000000..284bfb9
+--- /dev/null
++++ b/include/uapi/linux/close_range.h
+@@ -0,0 +1,10 @@
++#ifndef _UAPI_LINUX_CLOSE_RANGE_H
++#define _UAPI_LINUX_CLOSE_RANGE_H
++
++/* Unshare the file descriptor table before closing file descriptors. */
++#define CLOSE_RANGE_UNSHARE	(1U << 1)
++
++/* Set the FD_CLOEXEC bit instead of closing the file descriptor. */
++#define CLOSE_RANGE_CLOEXEC	(1U << 2)
++
++#endif /* _UAPI_LINUX_CLOSE_RANGE_H */

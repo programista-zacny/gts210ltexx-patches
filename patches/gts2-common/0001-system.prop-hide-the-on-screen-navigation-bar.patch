@@ -1,0 +1,16 @@
+diff --git a/system.prop b/system.prop
+index 51540b5..8c9e6ec 100644
+--- a/system.prop
++++ b/system.prop
+@@ -68,7 +68,10 @@ debug.sf.disable_backpressure=1
+ # enable on screen nav keys
+ # LOS team implemented this feature a month ago, but their patch doesn't consider the old devices which has the hardware buttons.
+ # So, it should be an option in the "Settings - Buttons" menu, but it only shows up for us when enabling the soft navigation bar.
+-qemu.hw.mainkeys=0
++# gts210ltexx: on-screen navigation bar off. The tablet has a physical Home key and capacitive
++# Back/Recents keys (config_deviceHardwareKeys=83), and the owner wants those instead of the
++# soft keys. Note this also hides the taskbar option, which needs the navigation bar.
++qemu.hw.mainkeys=1
+ 
+ # WiFi
+ wifi.interface=wlan0

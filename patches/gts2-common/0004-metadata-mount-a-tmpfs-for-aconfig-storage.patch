@@ -1,0 +1,37 @@
+diff --git a/BoardConfigCommon.mk b/BoardConfigCommon.mk
+index b1ce5ce..84fcc9c 100644
+--- a/BoardConfigCommon.mk
++++ b/BoardConfigCommon.mk
+@@ -53,7 +53,10 @@ TARGET_EXFAT_DRIVER := sdfat
+ 
+ BOARD_RAMDISK_USE_XZ := true
+ 
+-BOARD_ROOT_EXTRA_FOLDERS += efs
++# /metadata: mount point for the tmpfs that init.universal5433.rc mounts at early-init (there is
++# no metadata partition). The root of the system image is read-only, so the directory has to be
++# in the image.
++BOARD_ROOT_EXTRA_FOLDERS += efs metadata
+ TARGET_FS_CONFIG_GEN := $(LOCAL_PATH)/config.fs
+ 
+ BUILD_BROKEN_DUP_RULES := true
+diff --git a/rootdir/etc/init.universal5433.rc b/rootdir/etc/init.universal5433.rc
+index 0a07826..2216ad6 100644
+--- a/rootdir/etc/init.universal5433.rc
++++ b/rootdir/etc/init.universal5433.rc
+@@ -9,6 +9,16 @@ import /system/vendor/etc/init/hw/init.fingerprint.rc
+ on early-init
+     mount debugfs /sys/kernel/debug /sys/kernel/debug
+ 
++    # There is no metadata partition, but Android keeps its aconfig flag storage in
++    # /metadata/aconfig and aconfigd fills it at early-init (/system/etc/init/aconfigd.rc, which
++    # init runs after this action). Without it no flag package can be loaded. Use a tmpfs, as
++    # rINanDO's lineage-23.2 tree does: the flag storage is rebuilt from the images at every
++    # boot, and nothing else this device uses has to survive a reboot there. The mount point
++    # comes from BOARD_ROOT_EXTRA_FOLDERS; "mount" runs in init's own domain, "restorecon" in
++    # vendor_init. 32 MB is a cap, not a reservation (the storage takes about 1 MB).
++    mount tmpfs tmpfs /metadata nosuid nodev noexec mode=0755,size=32m
++    restorecon /metadata
++
+ on init
+     # See storage config details at http://source.android.com/tech/storage/
+     mkdir /mnt/media_rw/extSdCard 0700 media_rw media_rw

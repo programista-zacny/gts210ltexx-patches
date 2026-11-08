@@ -1,0 +1,15 @@
+diff --git a/runtime/jit/jit.cc b/runtime/jit/jit.cc
+index 94c2efc..b9f2b0b 100644
+--- a/runtime/jit/jit.cc
++++ b/runtime/jit/jit.cc
+@@ -556,6 +556,10 @@ void Jit::AddMemoryUsage(ArtMethod* method, size_t bytes) {
+ 
+ void Jit::NotifyZygoteCompilationDone() {
+   if (fd_methods_ == -1) {
++    // The shared boot image methods mapping could not be set up (e.g. the kernel's memfd
++    // does not support sealing). Children cannot map the methods, but the state still has to
++    // leave kDone, otherwise the CHECK in PostZygoteFork() aborts the zygote on the next fork.
++    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+     return;
+   }
+ 

@@ -1,0 +1,27 @@
+diff --git a/libc/upstream-openbsd/android/include/arc4random.h b/libc/upstream-openbsd/android/include/arc4random.h
+index 2770927..98ce366 100644
+--- a/libc/upstream-openbsd/android/include/arc4random.h
++++ b/libc/upstream-openbsd/android/include/arc4random.h
+@@ -18,6 +18,7 @@
+  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+  */
+ 
++#include <errno.h>
+ #include <pthread.h>
+ #include <sys/mman.h>
+ #include <sys/prctl.h>
+@@ -59,6 +60,14 @@ static inline int _rs_allocate(struct _rs** rsp, struct _rsx** rsxp) {
+     async_safe_fatal("arc4random data allocation failed: %m");
+   }
+ 
++  // Equivalent to OpenBSD's minherit(MAP_INHERIT_ZERO).
++  // EINVAL means the running kernel has no MADV_WIPEONFORK. That is the case for the recovery
++  // kernel under which the statically linked OTA updater runs, so carry on without fork
++  // detection there instead of aborting; our own kernel supports it.
++  if (madvise(p, size, MADV_WIPEONFORK) == -1 && errno != EINVAL) {
++    async_safe_fatal("arc4random data MADV_WIPEONFORK failed: %m");
++  }
++
+   // Give the allocation a name to make tombstones more intelligible.
+   prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, p, size, "arc4random data");
+ 

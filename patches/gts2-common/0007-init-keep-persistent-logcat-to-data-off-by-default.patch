@@ -1,0 +1,27 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] init: keep persistent logcat to /data off by default
+
+(From staging/fixes-3, patches/gts2-common/0007; that file has no header.)
+
+[combined set, 2026-11-06] The four added lines are those of the staged
+file. Regenerated because the trailing context is the comment of the
+previous patch, whose wording changed (see there).
+---
+ rootdir/etc/init.universal5433.rc | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/rootdir/etc/init.universal5433.rc b/rootdir/etc/init.universal5433.rc
+index cba69d0..534baca 100644
+--- a/rootdir/etc/init.universal5433.rc
++++ b/rootdir/etc/init.universal5433.rc
+@@ -673,6 +673,10 @@ service persistentLogging /system/bin/logcat -r 1024 -n 9 -f /data/.logs/log
+     class core
+     user system
+     group system
++    # Off unless asked for: the log on /data holds whatever apps print, account data included,
++    # and rewriting 10 MB of it around the clock wears the eMMC. Switch on with
++    #   setprop persist.vendor.logcat.enabled 1
++    disabled
+ 
+ # Note: without a "disabled" option the service above starts with class core on every boot; with
+ # one (see the service) it runs only while the property below is 1.

@@ -1,0 +1,179 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] cgroup: freezer: let frozen tasks be killed
+
+A task frozen by the cgroup (v1) freezer sleeps uninterruptibly in
+__refrigerator() and stays there with a pending SIGKILL until its cgroup
+is thawed. Android kills frozen apps without thawing them: the framework
+when it trims or force-stops them, init when zygote restarts, and on
+this device the in-kernel low memory killer, for which frozen cached
+apps are the first candidates. With the stock behaviour none of these
+kills would free any memory; lowmem_shrink() would wait a second for a
+victim that cannot die and then pick the same one again. The cgroup v2
+freezer, which Android has used since Android 12, lets frozen tasks be
+killed. Do the same here:
+
+- freezing_slow_path(): the cgroup freezer no longer applies to a task
+  that has a SIGKILL pending or whose thread group is exiting
+  (SIGNAL_GROUP_EXIT, which complete_signal() sets together with the
+  per-thread SIGKILL and which stays set after the thread has dequeued
+  the signal, until do_exit() sets PF_NOFREEZE). Such a task leaves the
+  refrigerator, is not sent there by freeze_task() or freezer_count(),
+  and does not keep a cgroup from reaching FROZEN.
+- __refrigerator(): a task that is frozen only by the cgroup freezer
+  sleeps in TASK_KILLABLE, so that the SIGKILL wakes it
+  (signal_wake_up(t, 1)). Signals that do not kill still do not wake it.
+
+The system-wide freezer used for suspend is unchanged: while pm_freezing
+or pm_nosig_freezing is set, freezing() is true for a killed task as
+before and the sleep is uninterruptible as before. A cgroup-frozen task
+that is killed during suspend wakes up once, sees the system-wide
+freeze, goes back to sleep and dies when thaw_processes() wakes it. The
+sleep state is chosen under freezer_lock so that the end of a
+system-wide freeze cannot leave a cgroup-frozen task in the
+uninterruptible sleep (see the comment in __refrigerator()). Tasks in
+the root cgroup and kernel threads are not affected at all.
+
+Every freezer cgroup except the root gets a file "freezer.killable"
+that reads 1, so that userspace can tell this kernel from one where a
+frozen task cannot be killed. The patched Android framework of this
+project only enables the app freezer when it finds the file.
+
+Android kernels that ran Android 11's v1 app freezer have a file of
+that name too (seen in LineageOS/android_kernel_google_msm-4.14 and in
+the 3.10 tree acroreiser/android_kernel_lenovo_a6010). There it is a
+per-cgroup switch, off by default, and the kill is handled by sleeping
+interruptibly and clearing TIF_SIGPENDING in the refrigerator loop, also
+while the system is suspending. Here the behaviour cannot be turned off
+(writing 1 to the file is accepted and does nothing, anything else is
+-EINVAL), the sleep is killable so that no pending-signal flag has to be
+touched, and the suspend freezer is kept out of it.
+
+There is no upstream commit for this; the mainline v1 freezer still
+holds killed tasks until the thaw.
+
+Compile-tested (GCC 4.9, lineage_gts210ltexx_defconfig); not run on the
+device.
+---
+ kernel/cgroup_freezer.c | 26 ++++++++++++++++++++++++++
+ kernel/freezer.c        | 44 +++++++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 67 insertions(+), 3 deletions(-)
+
+diff --git a/kernel/cgroup_freezer.c b/kernel/cgroup_freezer.c
+index 845050ce..e26c9db0 100644
+--- a/kernel/cgroup_freezer.c
++++ b/kernel/cgroup_freezer.c
+@@ -470,6 +470,26 @@ static u64 freezer_parent_freezing_read(struct cgroup *cgroup, struct cftype *cf
+ 	return (bool)(freezer->state & CGROUP_FREEZING_PARENT);
+ }
+ 
++/*
++ * "freezer.killable" reads 1: a frozen task of a freezer cgroup dies at once
++ * when it is killed (see cgroup_freezer_task_killed() in kernel/freezer.c),
++ * as with the cgroup v2 freezer.  Userspace that kills frozen processes
++ * without thawing them first can test for the file.  On Android kernels
++ * that have this file it is a per-cgroup switch that is off by default;
++ * here it cannot be turned off, so writing 1 is accepted and does nothing
++ * and writing anything else fails.
++ */
++static u64 freezer_killable_read(struct cgroup *cgroup, struct cftype *cft)
++{
++	return 1;
++}
++
++static int freezer_killable_write(struct cgroup *cgroup, struct cftype *cft,
++				  u64 val)
++{
++	return val == 1 ? 0 : -EINVAL;
++}
++
+ static struct cftype files[] = {
+ 	{
+ 		.name = "state",
+@@ -487,6 +507,12 @@ static struct cftype files[] = {
+ 		.flags = CFTYPE_NOT_ON_ROOT,
+ 		.read_u64 = freezer_parent_freezing_read,
+ 	},
++	{
++		.name = "killable",
++		.flags = CFTYPE_NOT_ON_ROOT,
++		.read_u64 = freezer_killable_read,
++		.write_u64 = freezer_killable_write,
++	},
+ 	{ }	/* terminate */
+ };
+ 
+diff --git a/kernel/freezer.c b/kernel/freezer.c
+index 4ada72f5..bfc0a307 100644
+--- a/kernel/freezer.c
++++ b/kernel/freezer.c
+@@ -28,6 +28,20 @@ EXPORT_SYMBOL_GPL(pm_freezing);
+ /* protects freezing and frozen transitions */
+ static DEFINE_SPINLOCK(freezer_lock);
+ 
++/*
++ * A task that is being killed is neither sent to nor kept in the
++ * refrigerator by the cgroup freezer, so that killing a frozen process
++ * frees its memory at once instead of when the cgroup is thawed.
++ * SIGNAL_GROUP_EXIT covers the time after the task has dequeued its
++ * SIGKILL and before do_exit() sets PF_NOFREEZE.  The system-wide (PM)
++ * freezer is not affected, see freezing_slow_path().
++ */
++static bool cgroup_freezer_task_killed(struct task_struct *p)
++{
++	return __fatal_signal_pending(p) ||
++	       (p->signal->flags & SIGNAL_GROUP_EXIT);
++}
++
+ /**
+  * freezing_slow_path - slow path for testing whether a task needs to be frozen
+  * @p: task to be tested
+@@ -45,12 +59,15 @@ bool freezing_slow_path(struct task_struct *p)
+ 	if (test_thread_flag(TIF_MEMDIE))
+ 		return false;
+ 
+-	if (pm_nosig_freezing || cgroup_freezing(p))
++	if (pm_nosig_freezing)
+ 		return true;
+ 
+ 	if (pm_freezing && !(p->flags & PF_KTHREAD))
+ 		return true;
+ 
++	if (cgroup_freezing(p) && !cgroup_freezer_task_killed(p))
++		return true;
++
+ 	return false;
+ }
+ EXPORT_SYMBOL(freezing_slow_path);
+@@ -66,9 +83,30 @@ bool __refrigerator(bool check_kthr_stop)
+ 	pr_debug("%s entered refrigerator\n", current->comm);
+ 
+ 	for (;;) {
+-		set_current_state(TASK_UNINTERRUPTIBLE);
+-
+ 		spin_lock_irq(&freezer_lock);
++		/*
++		 * A task that is here only because of the cgroup freezer
++		 * sleeps killable: SIGKILL wakes it up, freezing() is then
++		 * false for it (see freezing_slow_path()) and it leaves to
++		 * die.  While a system-wide freeze is in progress every task
++		 * has to stay put, killed or not, so the sleep is
++		 * uninterruptible then, and a kill that arrives in the
++		 * meantime is acted upon when thaw_processes() wakes the
++		 * task up.
++		 *
++		 * The state is chosen under freezer_lock: thaw_processes()
++		 * clears the pm_* flags before it calls __thaw_task(), which
++		 * takes the lock and wakes every task that has PF_FROZEN set.
++		 * A task that saw the flags set here is therefore woken up
++		 * afterwards and chooses again.  When a system-wide freeze
++		 * starts after the flags were read, a killed task falls
++		 * through schedule() once and chooses again as well.
++		 */
++		if (pm_freezing || pm_nosig_freezing)
++			set_current_state(TASK_UNINTERRUPTIBLE);
++		else
++			set_current_state(TASK_KILLABLE);
++
+ 		current->flags |= PF_FROZEN;
+ 		if (!freezing(current) ||
+ 		    (check_kthr_stop && kthread_should_stop()))

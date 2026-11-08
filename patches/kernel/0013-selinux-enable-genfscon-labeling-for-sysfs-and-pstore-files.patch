@@ -1,0 +1,71 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] selinux: enable genfscon labeling for sysfs and pstore files
+
+Support per-file labeling of sysfs and pstore files based on genfscon
+policy entries, as the tree already does for proc and debugfs. Until now
+"genfscon sysfs <path>" rules were ignored: every sysfs node started as
+"sysfs" and only got another type when ueventd's restorecon found a
+file_contexts entry for it. Current Android policy labels sysfs almost
+entirely through genfscon and has few sysfs file_contexts entries left.
+
+The label is computed from the node's path inside sysfs when the dentry
+is instantiated, by longest genfscon prefix. Symlinks are skipped
+(!S_ISLNK in inode_doinit_with_dentry()), so a rule only applies to the
+real path under /sys/devices, /sys/module, /sys/power, ... and to the
+/sys/class/<name> and /sys/bus/<name>/devices directories themselves, not
+to the links inside them.
+
+A label set from userspace still wins and still sticks: sysfs keeps it in
+the sysfs_dirent (sysfs_setxattr()) and replays it through
+security_inode_notifysecctx() when the inode is set up again, which marks
+the inode initialized before inode_doinit_with_dentry() gets to it. So
+file_contexts entries keep the effect they have today.
+
+This changes labels that are in use. With the policy of the current
+gts210ltexx build, nodes that no file_contexts entry covers move from
+"sysfs" to the type of the matching genfscon rule, and a domain that
+reaches such a node only through its blanket "sysfs" rules loses access.
+Known cases on this device:
+  /sys/devices/virtual/sec/gps (sysfs_sec_gps): gpsd follows
+      /sys/class/sec/gps/GPS_PWR_EN/value (gps.xml) through it and has
+      no rule for sysfs_sec_gps; needs at least
+      "allow gpsd sysfs_sec_gps:dir search;"
+  /sys/class/switch, /sys/devices/virtual/switch (sysfs_switch):
+      hwcomposer.exynos5 opens /sys/class/switch/hdmi/state;
+      hal_graphics_composer_default has no rule for sysfs_switch
+  /sys/power/cpufreq_max_limit (sysfs_power_writable): libbauthserver
+      (hal_fingerprint_default) opens it and has no rule for the type
+Add those rules to the device policy together with this patch and check
+the first boot for new avc denials on tclass=file/dir/lnk_file with a
+sysfs_* tcontext.
+
+Derived from upstream:
+  8e014720 "selinux: enable genfscon labeling for sysfs and pstore files"
+
+Adapted for 3.10: none needed in the code. SE_SBGENFS and the debugfs
+case (134509d54e4e "selinux: enable per-file labeling for debugfs
+files.") are already in the tree. sysfs here is the pre-kernfs
+implementation; it instantiates dentries through d_materialise_unique(),
+which calls security_d_instantiate() like the other paths, and
+dentry_path_raw() yields the path relative to the sysfs root.
+
+Not compile-tested.
+---
+ security/selinux/hooks.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 4db0bd6..4f8967e 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -736,7 +736,9 @@ static int selinux_set_mnt_opts(struct super_block *sb,
+ 	if (strcmp(sb->s_type->name, "proc") == 0)
+ 		sbsec->flags |= SE_SBPROC | SE_SBGENFS;
+ 
+-	if (strcmp(sb->s_type->name, "debugfs") == 0)
++	if (!strcmp(sb->s_type->name, "debugfs") ||
++	    !strcmp(sb->s_type->name, "sysfs") ||
++	    !strcmp(sb->s_type->name, "pstore"))
+ 		sbsec->flags |= SE_SBGENFS;
+ 
+ 	/* Determine the labeling behavior to use for this filesystem type. */

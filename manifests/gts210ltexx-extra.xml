@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Extra projects for the gts210ltexx (SM-T815) build, on top of rINanDO's exynos5433-24.0.xml -->
+<manifest>
+  <!-- microG, FakeStore, GsfProxy, F-Droid (enabled with WITH_GMS=true) -->
+  <project path="vendor/partner_gms" name="lineageos4microg/android_vendor_partner_gms" remote="github" revision="master" clone-depth="1" />
+</manifest>

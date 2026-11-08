@@ -1,0 +1,52 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] binder: use EINTR for interrupted wait for work
+
+When a signal interrupts a thread that waits for work in
+binder_wait_for_work(), return -EINTR instead of -ERESTARTSYS. The
+BINDER_WRITE_READ ioctl is then no longer restarted by the kernel when
+there is no signal handler or the handler has SA_RESTART; userspace sees
+EINTR and repeats the call itself. libbinder and libhwbinder do
+(IPCThreadState::talkWithDriver(): "} while (err == -EINTR);"), and they
+always had to, for handlers installed without SA_RESTART.
+
+This is the third patch of the upstream freezer series and the behaviour
+of every kernel since 5.13, which is what current Android userspace is
+developed against. The other patches of this series do not depend on it
+and it can be left out on its own: on this kernel the threads that wait
+here are marked PF_FREEZER_SKIP (freezer_do_not_count()), so the
+freezers do not send them their fake signal and only real signals
+interrupt the wait.
+
+Derived from upstream:
+  95c16f9d9cf9 "binder: use EINTR for interrupted wait for work"
+
+Applies as upstream.
+
+Compile-tested (GCC 4.9, lineage_gts210ltexx_defconfig); not run on the
+device.
+---
+ drivers/android/binder.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index 47c0cba4..2450f609 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -4077,7 +4077,7 @@ static int binder_wait_for_work(struct binder_thread *thread,
+ 		binder_inner_proc_lock(proc);
+ 		list_del_init(&thread->waiting_thread_node);
+ 		if (signal_pending(current)) {
+-			ret = -ERESTARTSYS;
++			ret = -EINTR;
+ 			break;
+ 		}
+ 	}
+@@ -5181,7 +5181,7 @@ err:
+ 	if (thread)
+ 		thread->looper_need_return = false;
+ 	wait_event_interruptible(binder_user_error_wait, binder_stop_on_user_error < 2);
+-	if (ret && ret != -ERESTARTSYS)
++	if (ret && ret != -EINTR)
+ 		pr_info("%d:%d ioctl %x %lx returned %d\n", proc->pid, current->pid, cmd, arg, ret);
+ err_unlocked:
+ 	trace_binder_ioctl_done(ret);

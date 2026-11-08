@@ -1,0 +1,575 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] pidfd: add pidfd_open(), pidfd_send_signal(), exit polling and
+ waitid(P_PIDFD)
+
+File descriptors that refer to a process, behind the new option
+CONFIG_PIDFD (mainline has none). Android's lmkd opens a pidfd for every
+process it may have to kill, kills through it and waits for the death
+with epoll; installd, ART and dumpstate wait for their children the same
+way.
+
+Mainline commits:
+  3eb39f47934f signal: add pidfd_send_signal() syscall (v5.1)
+  b3e583825266 clone: add CLONE_PIDFD (v5.2), only the pidfd file and its
+               fdinfo
+  32fcb426ec00 pid: add pidfd_open() (v5.3)
+  b53b0b9d9a61 pidfd: add polling support (v5.3)
+  b191d6491be6 pidfd: fix a poll race when setting exit_state
+  3695eae5fee0 pidfd: add P_PIDFD to waitid() (v5.4)
+
+The ARM syscall slots reserved by the table extension are wired up: 424
+pidfd_send_signal, 434 pidfd_open. Both have cond_syscall() entries, so
+with CONFIG_PIDFD off they return -ENOSYS as before.
+
+Adapted to 3.10:
+  - The code is in a file of its own, kernel/pidfd.c, instead of being
+    spread over pid.c, fork.c and signal.c.
+  - No PIDTYPE_TGID: pidfd_open() accepts a pid whose task is a thread
+    group leader.
+  - Poll wakeup. Mainline wakes the pollers from do_notify_parent() and,
+    since b191d6491be6, sets exit_state before that call. 3.10's
+    exit_notify() sets exit_state after do_notify_parent(); instead of
+    reordering it, the pollers are woken a second time in exit_notify()
+    right after exit_state is set. The call in do_notify_parent() covers
+    the delayed notification of a leader whose last thread goes away in
+    release_task().
+  - pidfd_send_signal() only takes pidfds, not /proc/<pid> directory
+    descriptors.
+  - fdinfo prints "Pid:" in the pid namespace of the reader; a 3.10
+    seq_file does not lead back to the procfs instance.
+  - struct pid gets the wait queue only with CONFIG_PIDFD.
+
+Not implemented: CLONE_PIDFD, pidfd_getfd(), PIDFD_NONBLOCK, and
+process_madvise()/process_mrelease(), which take a pidfd.
+
+[combined set, 2026-11-06] From staging/backport-psi-pidfd
+0049, renumbered to 0024 to follow the combined series (0014-0023); it
+does not need the PSI/workingset patches 0040-0048 it was written on top
+of. Changed in one way: the hunks for arch/arm/include/uapi/asm/unistd.h,
+arch/arm/kernel/calls.S and kernel/sys_ni.c (the two __NR_ numbers, the
+two table entries and the two cond_syscall() lines) are not in this file
+any more. They are in the replacement for patch 0008 of this set,
+because they change lines 0008 adds and scripts/prepare-tree.sh
+cannot handle that (see the note there). The two files together produce
+the same tree as the staged 0049 on top of the canonical 0008. Everything
+else is unchanged.
+
+Compile-tested on top of the combined series: zImage with CONFIG_PIDFD=y
+and with CONFIG_PIDFD off (GCC 4.9, the Android build's flags), no
+warnings in the files touched. Not run on the device.
+---
+ include/linux/pid.h       |  15 ++++
+ include/linux/syscalls.h  |   4 +
+ include/uapi/linux/wait.h |   1 +
+ init/Kconfig              |  17 ++++
+ kernel/Makefile           |   1 +
+ kernel/exit.c             |  15 +++-
+ kernel/pid.c              |   6 ++
+ kernel/pidfd.c            | 314 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ kernel/signal.c           |   6 ++
+ 9 files changed, 378 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/pid.h b/include/linux/pid.h
+index ed7b1f73..0c685725 100644
+--- a/include/linux/pid.h
++++ b/include/linux/pid.h
+@@ -2,6 +2,9 @@
+ #define _LINUX_PID_H
+ 
+ #include <linux/rcupdate.h>
++#ifdef CONFIG_PIDFD
++#include <linux/wait.h>
++#endif
+ 
+ enum pid_type
+ {
+@@ -62,12 +65,24 @@ struct pid
+ 	unsigned int level;
+ 	/* lists of tasks that use this pid */
+ 	struct hlist_head tasks[PIDTYPE_MAX];
++#ifdef CONFIG_PIDFD
++	/* wait queue for pidfd notifications */
++	wait_queue_head_t wait_pidfd;
++#endif
+ 	struct rcu_head rcu;
+ 	struct upid numbers[1];
+ };
+ 
+ extern struct pid init_struct_pid;
+ 
++struct task_struct;
++#ifdef CONFIG_PIDFD
++extern void do_notify_pidfd(struct task_struct *task);
++extern struct pid *pidfd_get_pid(unsigned int fd);
++#else
++static inline void do_notify_pidfd(struct task_struct *task) { }
++#endif
++
+ struct pid_link
+ {
+ 	struct hlist_node node;
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 89e094db..cf7f6899 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -354,6 +354,10 @@ asmlinkage long sys_kill(int pid, int sig);
+ asmlinkage long sys_tgkill(int tgid, int pid, int sig);
+ asmlinkage long sys_tkill(int pid, int sig);
+ asmlinkage long sys_rt_sigqueueinfo(int pid, int sig, siginfo_t __user *uinfo);
++asmlinkage long sys_pidfd_open(pid_t pid, unsigned int flags);
++asmlinkage long sys_pidfd_send_signal(int pidfd, int sig,
++				      siginfo_t __user *info,
++				      unsigned int flags);
+ asmlinkage long sys_sgetmask(void);
+ asmlinkage long sys_ssetmask(int newmask);
+ asmlinkage long sys_signal(int sig, __sighandler_t handler);
+diff --git a/include/uapi/linux/wait.h b/include/uapi/linux/wait.h
+index 9393eead..fda15da9 100644
+--- a/include/uapi/linux/wait.h
++++ b/include/uapi/linux/wait.h
+@@ -16,6 +16,7 @@
+ #define P_ALL		0
+ #define P_PID		1
+ #define P_PGID		2
++#define P_PIDFD		3
+ 
+ 
+ #endif /* _UAPI_LINUX_WAIT_H */
+diff --git a/init/Kconfig b/init/Kconfig
+index fc95f599..e56f2ed3 100644
+--- a/init/Kconfig
++++ b/init/Kconfig
+@@ -1402,6 +1402,23 @@ config EPOLL
+ 	  Disabling this option will cause the kernel to be built without
+ 	  support for epoll family of system calls.
+ 
++config PIDFD
++	bool "Enable pidfd_open(), pidfd_send_signal() and pidfd polling"
++	select ANON_INODES
++	default n
++	help
++	  Enable file descriptors that refer to a process: the pidfd_open()
++	  and pidfd_send_signal() system calls, and poll() on a pidfd to wait
++	  for the process to exit. Android's lmkd uses them to signal the
++	  processes it kills without racing against pid reuse and to wait
++	  for them to die.
++
++	  Mainline has no option for this; it exists in this backport so
++	  that the feature can be switched off. waitid(P_PIDFD) is
++	  included; CLONE_PIDFD and pidfd_getfd() are not implemented.
++
++	  If unsure, say N.
++
+ config SIGNALFD
+ 	bool "Enable signalfd() system call" if EXPERT
+ 	select ANON_INODES
+diff --git a/kernel/Makefile b/kernel/Makefile
+index 271fd311..0c66b122 100644
+--- a/kernel/Makefile
++++ b/kernel/Makefile
+@@ -27,6 +27,7 @@ obj-y += power/
+ obj-y += cpu/
+ 
+ obj-$(CONFIG_CHECKPOINT_RESTORE) += kcmp.o
++obj-$(CONFIG_PIDFD) += pidfd.o
+ obj-$(CONFIG_FREEZER) += freezer.o
+ obj-$(CONFIG_PROFILING) += profile.o
+ obj-$(CONFIG_STACKTRACE) += stacktrace.o
+diff --git a/kernel/exit.c b/kernel/exit.c
+index 481aa502..44463f06 100644
+--- a/kernel/exit.c
++++ b/kernel/exit.c
+@@ -684,6 +684,8 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
+ 	}
+ 
+ 	tsk->exit_state = autoreap ? EXIT_DEAD : EXIT_ZOMBIE;
++	/* pidfd pollers must be woken after exit_state is set */
++	do_notify_pidfd(tsk);
+ 
+ 	/* mt-exec, de_thread() is waiting for group leader */
+ 	if (unlikely(tsk->signal->notify_count < 0))
+@@ -1605,11 +1607,22 @@ SYSCALL_DEFINE5(waitid, int, which, pid_t, upid, struct siginfo __user *,
+ 		if (upid <= 0)
+ 			return -EINVAL;
+ 		break;
++#ifdef CONFIG_PIDFD
++	case P_PIDFD:
++		type = PIDTYPE_PID;
++		if (upid < 0)
++			return -EINVAL;
++
++		pid = pidfd_get_pid(upid);
++		if (IS_ERR(pid))
++			return PTR_ERR(pid);
++		break;
++#endif
+ 	default:
+ 		return -EINVAL;
+ 	}
+ 
+-	if (type < PIDTYPE_MAX)
++	if (type < PIDTYPE_MAX && !pid)
+ 		pid = find_get_pid(upid);
+ 
+ 	wo.wo_type	= type;
+diff --git a/kernel/pid.c b/kernel/pid.c
+index ffca7bfb..1819d919 100644
+--- a/kernel/pid.c
++++ b/kernel/pid.c
+@@ -318,6 +318,9 @@ struct pid *alloc_pid(struct pid_namespace *ns)
+ 	atomic_set(&pid->count, 1);
+ 	for (type = 0; type < PIDTYPE_MAX; ++type)
+ 		INIT_HLIST_HEAD(&pid->tasks[type]);
++#ifdef CONFIG_PIDFD
++	init_waitqueue_head(&pid->wait_pidfd);
++#endif
+ 
+ 	upid = pid->numbers + ns->level;
+ 	spin_lock_irq(&pidmap_lock);
+@@ -595,6 +598,9 @@ void __init pidmap_init(void)
+ 	set_bit(0, init_pid_ns.pidmap[0].page);
+ 	atomic_dec(&init_pid_ns.pidmap[0].nr_free);
+ 	init_pid_ns.nr_hashed = PIDNS_HASH_ADDING;
++#ifdef CONFIG_PIDFD
++	init_waitqueue_head(&init_struct_pid.wait_pidfd);
++#endif
+ 
+ 	init_pid_ns.pid_cachep = KMEM_CACHE(pid,
+ 			SLAB_HWCACHE_ALIGN | SLAB_PANIC);
+diff --git a/kernel/pidfd.c b/kernel/pidfd.c
+new file mode 100644
+index 00000000..7576236a
+--- /dev/null
++++ b/kernel/pidfd.c
+@@ -0,0 +1,314 @@
++/*
++ * pidfd: file descriptors that refer to a process
++ *
++ * Backport to 3.10 of the mainline pidfd pieces Android's lmkd uses:
++ *
++ *   pidfd_open()         32fcb426ec00 "pid: add pidfd_open()"
++ *   pidfd_send_signal()  3eb39f47934f "signal: add pidfd_send_signal() syscall"
++ *   pidfd file, fdinfo   b3e583825266 "clone: add CLONE_PIDFD" (the file only)
++ *   poll() for exit      b53b0b9d9a61 "pidfd: add polling support"
++ *   waitid(P_PIDFD)      3695eae5fee0 "pidfd: add P_PIDFD to waitid()"
++ *                        (the lookup; the hunk itself is in kernel/exit.c)
++ *
++ * Mainline keeps this code in kernel/pid.c, kernel/fork.c and
++ * kernel/signal.c; it lives in one file here so that the whole feature
++ * hangs off CONFIG_PIDFD.
++ *
++ * Not implemented: CLONE_PIDFD, pidfd_getfd(), and pidfd_send_signal()
++ * on a /proc/<pid> directory file descriptor.
++ */
++
++#include <linux/anon_inodes.h>
++#include <linux/compat.h>
++#include <linux/file.h>
++#include <linux/fs.h>
++#include <linux/pid.h>
++#include <linux/pid_namespace.h>
++#include <linux/poll.h>
++#include <linux/rcupdate.h>
++#include <linux/sched.h>
++#include <linux/seq_file.h>
++#include <linux/signal.h>
++#include <linux/syscalls.h>
++#include <linux/uaccess.h>
++#include <linux/wait.h>
++
++static const struct file_operations pidfd_fops;
++
++static struct pid *pidfd_pid(const struct file *file)
++{
++	if (file->f_op == &pidfd_fops)
++		return file->private_data;
++
++	return ERR_PTR(-EBADF);
++}
++
++static int pidfd_release(struct inode *inode, struct file *file)
++{
++	struct pid *pid = file->private_data;
++
++	file->private_data = NULL;
++	put_pid(pid);
++	return 0;
++}
++
++#ifdef CONFIG_PROC_FS
++static int pidfd_show_fdinfo(struct seq_file *m, struct file *f)
++{
++	/*
++	 * Mainline uses the pid namespace of the procfs instance; a 3.10
++	 * seq_file does not lead back to it, so use the reader's.
++	 */
++	struct pid_namespace *ns = task_active_pid_ns(current);
++	struct pid *pid = f->private_data;
++
++	return seq_printf(m, "Pid:\t%d\n", pid_nr_ns(pid, ns));
++}
++#endif
++
++/*
++ * Poll support for process exit notification.
++ */
++static unsigned int pidfd_poll(struct file *file, struct poll_table_struct *pts)
++{
++	struct task_struct *task;
++	struct pid *pid = file->private_data;
++	unsigned int poll_flags = 0;
++
++	poll_wait(file, &pid->wait_pidfd, pts);
++
++	rcu_read_lock();
++	task = pid_task(pid, PIDTYPE_PID);
++	/*
++	 * Inform pollers only when the whole thread group exits.
++	 * If the thread group leader exits before all other threads in the
++	 * group, then poll(2) should block, similar to the wait(2) family.
++	 */
++	if (!task || (task->exit_state && thread_group_empty(task)))
++		poll_flags = POLLIN | POLLRDNORM;
++	rcu_read_unlock();
++
++	return poll_flags;
++}
++
++static const struct file_operations pidfd_fops = {
++	.release	= pidfd_release,
++	.poll		= pidfd_poll,
++#ifdef CONFIG_PROC_FS
++	.show_fdinfo	= pidfd_show_fdinfo,
++#endif
++};
++
++/**
++ * pidfd_get_pid - get a reference to the pid a pidfd refers to
++ * @fd: the file descriptor
++ *
++ * Returns the pid with its reference count raised, or an ERR_PTR() if
++ * @fd is not a pidfd.
++ */
++struct pid *pidfd_get_pid(unsigned int fd)
++{
++	struct fd f;
++	struct pid *pid;
++
++	f = fdget(fd);
++	if (!f.file)
++		return ERR_PTR(-EBADF);
++
++	pid = pidfd_pid(f.file);
++	if (!IS_ERR(pid))
++		get_pid(pid);
++
++	fdput(f);
++	return pid;
++}
++
++/**
++ * do_notify_pidfd - wake up the pollers of a task's pidfds
++ * @task: the task whose exit state changed
++ *
++ * Called with tasklist_lock write-held, after @task->exit_state has been
++ * set, so that a poller that queued itself before the wakeup sees the new
++ * state when it looks (see b191d6491be6 "pidfd: fix a poll race when
++ * setting exit_state").
++ */
++void do_notify_pidfd(struct task_struct *task)
++{
++	struct pid *pid = task_pid(task);
++
++	if (pid)
++		wake_up_all(&pid->wait_pidfd);
++}
++
++/**
++ * pidfd_create() - Create a new pid file descriptor.
++ *
++ * @pid:  struct pid that the pidfd will reference
++ *
++ * This creates a new pid file descriptor with the O_CLOEXEC flag set.
++ *
++ * Return: On success, a cloexec pidfd is returned.
++ *         On error, a negative errno number will be returned.
++ */
++static int pidfd_create(struct pid *pid)
++{
++	int fd;
++
++	fd = anon_inode_getfd("[pidfd]", &pidfd_fops, get_pid(pid),
++			      O_RDWR | O_CLOEXEC);
++	if (fd < 0)
++		put_pid(pid);
++
++	return fd;
++}
++
++/**
++ * pidfd_open() - Open new pid file descriptor.
++ *
++ * @pid:   pid for which to retrieve a pidfd
++ * @flags: flags to pass
++ *
++ * This creates a new pid file descriptor with the O_CLOEXEC flag set for
++ * the process identified by @pid. The process identified by @pid must be
++ * a thread-group leader: polling only supports thread-group leaders.
++ *
++ * Return: On success, a cloexec pidfd is returned.
++ *         On error, a negative errno number will be returned.
++ */
++SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
++{
++	struct task_struct *task;
++	struct pid *p;
++	int fd, ret;
++
++	if (flags)
++		return -EINVAL;
++
++	if (pid <= 0)
++		return -EINVAL;
++
++	p = find_get_pid(pid);
++	if (!p)
++		return -ESRCH;
++
++	/* 3.10 has no PIDTYPE_TGID: look at the task the pid is attached to */
++	ret = 0;
++	rcu_read_lock();
++	task = pid_task(p, PIDTYPE_PID);
++	if (!task || !thread_group_leader(task))
++		ret = -EINVAL;
++	rcu_read_unlock();
++
++	fd = ret ? ret : pidfd_create(p);
++	put_pid(p);
++	return fd;
++}
++
++/*
++ * Verify that the signaler and signalee either are in the same pid namespace
++ * or that the signaler's pid namespace is an ancestor of the signalee's pid
++ * namespace.
++ */
++static bool access_pidfd_pidns(struct pid *pid)
++{
++	struct pid_namespace *active = task_active_pid_ns(current);
++	struct pid_namespace *p = ns_of_pid(pid);
++
++	for (;;) {
++		if (!p)
++			return false;
++		if (p == active)
++			break;
++		p = p->parent;
++	}
++
++	return true;
++}
++
++static int copy_siginfo_from_user_any(siginfo_t *kinfo, siginfo_t __user *info)
++{
++#ifdef CONFIG_COMPAT
++	/*
++	 * Avoid hooking up compat syscalls and instead handle necessary
++	 * conversions here.
++	 */
++	if (is_compat_task())
++		return copy_siginfo_from_user32(kinfo,
++				(struct compat_siginfo __user *)info);
++#endif
++	if (copy_from_user(kinfo, info, sizeof(siginfo_t)))
++		return -EFAULT;
++	return 0;
++}
++
++/**
++ * sys_pidfd_send_signal - Signal a process through a pidfd
++ * @pidfd:  file descriptor of the process
++ * @sig:    signal to send
++ * @info:   signal info
++ * @flags:  future flags
++ *
++ * The syscall signals the process the pidfd refers to, like
++ * kill(<positive-pid>, <signal>). It does not signal threads or process
++ * groups.
++ *
++ * Return: 0 on success, negative errno on failure
++ */
++SYSCALL_DEFINE4(pidfd_send_signal, int, pidfd, int, sig,
++		siginfo_t __user *, info, unsigned int, flags)
++{
++	int ret;
++	struct fd f;
++	struct pid *pid;
++	siginfo_t kinfo;
++
++	/* Enforce flags be set to 0 until we add an extension. */
++	if (flags)
++		return -EINVAL;
++
++	f = fdget(pidfd);
++	if (!f.file)
++		return -EBADF;
++
++	/* Is this a pidfd? */
++	pid = pidfd_pid(f.file);
++	if (IS_ERR(pid)) {
++		ret = PTR_ERR(pid);
++		goto err;
++	}
++
++	ret = -EINVAL;
++	if (!access_pidfd_pidns(pid))
++		goto err;
++
++	if (info) {
++		ret = copy_siginfo_from_user_any(&kinfo, info);
++		if (unlikely(ret))
++			goto err;
++
++		ret = -EINVAL;
++		if (unlikely(sig != kinfo.si_signo))
++			goto err;
++
++		/* Only allow sending arbitrary signals to yourself. */
++		ret = -EPERM;
++		if ((task_pid(current) != pid) &&
++		    (kinfo.si_code >= 0 || kinfo.si_code == SI_TKILL))
++			goto err;
++	} else {
++		/* what kill(2) would send */
++		memset(&kinfo, 0, sizeof(kinfo));
++		kinfo.si_signo = sig;
++		kinfo.si_errno = 0;
++		kinfo.si_code = SI_USER;
++		kinfo.si_pid = task_tgid_vnr(current);
++		kinfo.si_uid = from_kuid_munged(current_user_ns(),
++						current_uid());
++	}
++
++	ret = kill_pid_info(sig, &kinfo, pid);
++
++err:
++	fdput(f);
++	return ret;
++}
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 408f944d..77d7e5fd 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -1647,6 +1647,12 @@ bool do_notify_parent(struct task_struct *tsk, int sig)
+ 	BUG_ON(!tsk->ptrace &&
+ 	       (tsk->group_leader != tsk || !thread_group_empty(tsk)));
+ 
++	/*
++	 * Wake up all pidfd waiters. When called from exit_notify(),
++	 * exit_state is not set yet; exit_notify() wakes them again.
++	 */
++	do_notify_pidfd(tsk);
++
+ 	if (sig != SIGCHLD) {
+ 		/*
+ 		 * This is only possible if parent == real_parent.

@@ -1,0 +1,5 @@
+# Widevine reads the factory keybox from /efs/cpk/h2k.dat; it was denied "search" on /efs
+# (efs_file) on every boot. The file itself is world-readable in DAC terms.
+allow hal_drm_widevine efs_file:dir search;
+allow hal_drm_widevine cpk_efs_file:dir search;
+allow hal_drm_widevine cpk_efs_file:file r_file_perms;

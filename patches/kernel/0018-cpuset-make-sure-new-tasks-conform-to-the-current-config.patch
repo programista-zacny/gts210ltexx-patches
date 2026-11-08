@@ -1,0 +1,85 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] cpuset: make sure new tasks conform to the current config of the cpuset
+
+A new task copies cpus_allowed and mems_allowed from its parent early in
+copy_process() and is linked into its cgroup's task list much later. If
+the cpuset rewrites the masks of its tasks in between, the new task is
+not on the list yet and keeps the old mask.
+
+With "cpuset: restore the requested CPUs when they come back online" every
+hotplug event rewrites those masks, and on this board the hotplug governor
+produces such events at each screen-off and screen-on, exactly when
+processes and threads are being created. A thread that loses the race
+when the screen comes on keeps the screen-off mask (cpu0 only) until the
+next hotplug event that changes its cpuset.
+
+Copy the parent's masks again from the cpuset fork callback, which runs
+once the task is on the list.
+
+Derived from upstream:
+  06f4e9489891 "cpuset: make sure new tasks conform to the current config
+               of the cpuset" (v4.8; 87fe0cd807d1 in android-3.18 through
+               3.18-stable)
+
+Adapted for 3.10:
+- No task_css_is_root(); the root cpuset is recognized by comparing
+  task_cs() with top_cpuset under rcu_read_lock().
+- cpuset_fork() is static and referenced from cpuset_subsys directly.
+  CONFIG_CGROUP_FREEZER already has a fork callback, so
+  need_forkexit_callback does not change.
+
+Compile-tested as part of the cpuset series with CONFIG_CPUSETS=y: full
+zImage with the GCC 4.9 arm-linux-androideabi prebuilt, and
+kernel/cpuset.o and kernel/cgroup.o at every step of the series; no
+warnings in the files touched. Not run on the device.
+
+[combined set, 2026-11-06] Header only, the diff is the staged one. The
+paragraph above said "five patches". The series was staged as five
+(staging/backport-cpusets 0014-0018) and compiled step by step in that
+form; the combined set has four of them, 0015-0018. The fifth, "cpuset:
+let CAP_SYS_NICE move other users' tasks into a cpuset" (staged 0015),
+is replaced by "cgroup: one credential rule for moving another user's
+task" (0014). The four were compiled again in that form, as one zImage
+build of the whole combined series, not step by step.
+---
+ kernel/cpuset.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/kernel/cpuset.c b/kernel/cpuset.c
+index 6e3a067..71a1482 100644
+--- a/kernel/cpuset.c
++++ b/kernel/cpuset.c
+@@ -2093,6 +2093,25 @@ static void cpuset_css_free(struct cgroup *cont)
+ 	kfree(cs);
+ }
+ 
++/*
++ * Make sure the new task conforms to the current state of its parent,
++ * which could have been changed by cpuset just after it inherited the
++ * state from the parent and before it sits on the cgroup's task list.
++ */
++static void cpuset_fork(struct task_struct *task)
++{
++	bool in_top;
++
++	rcu_read_lock();
++	in_top = task_cs(task) == &top_cpuset;
++	rcu_read_unlock();
++	if (in_top)
++		return;
++
++	set_cpus_allowed_ptr(task, &current->cpus_allowed);
++	task->mems_allowed = current->mems_allowed;
++}
++
+ struct cgroup_subsys cpuset_subsys = {
+ 	.name = "cpuset",
+ 	.css_alloc = cpuset_css_alloc,
+@@ -2105,6 +2124,7 @@ struct cgroup_subsys cpuset_subsys = {
+ 	.attach = cpuset_attach,
+ 	.subsys_id = cpuset_subsys_id,
+ 	.base_cftypes = files,
++	.fork = cpuset_fork,
+ 	.early_init = 1,
+ };
+ 

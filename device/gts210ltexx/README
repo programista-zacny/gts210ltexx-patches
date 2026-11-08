@@ -1,0 +1,14 @@
+Device configuration for the Samsung Galaxy Tab S2 9.7 LTE (SM-T815, gts210ltexx), built without modem/RIL support (Wi-Fi only)
+
+Copyright (C) 2016 Jan Huijsmans <huysmans@koffie.nu>
+Based on T815 work of Christopher N. Hesse <raymanfx@gmail.com>
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------
+
+EOF

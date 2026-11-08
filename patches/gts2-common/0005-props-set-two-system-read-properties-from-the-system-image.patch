@@ -1,0 +1,26 @@
+diff --git a/device-common.mk b/device-common.mk
+index e6ab10e..fefc7be 100644
+--- a/device-common.mk
++++ b/device-common.mk
+@@ -53,7 +53,10 @@ PRODUCT_PROPERTY_OVERRIDES += \
+     ro.bt.bdaddr_path="/efs/bluetooth/bt_addr"
+ 
+ # BPF - needed for ultra legacy devices
+-PRODUCT_PROPERTY_OVERRIDES += \
++# (PRODUCT_SYSTEM_PROPERTIES: a PRODUCT_PROPERTY_OVERRIDES entry is also written to
++# /vendor/build.prop, where init loads it as vendor_init, which may not set this property; the
++# value always came from /system/build.prop.)
++PRODUCT_SYSTEM_PROPERTIES += \
+     ro.kernel.ebpf.supported=false
+ 
+ # Camera
+@@ -325,7 +328,8 @@ PRODUCT_PACKAGES += \
+     android.hardware.usb@1.3-service.basic
+ 
+ # Vendor security patch level
+-PRODUCT_PROPERTY_OVERRIDES += \
++# (PRODUCT_SYSTEM_PROPERTIES for the same reason as ro.kernel.ebpf.supported above.)
++PRODUCT_SYSTEM_PROPERTIES += \
+     ro.lineage.build.vendor_security_patch=2018-01-05
+ 
+ # VNDK

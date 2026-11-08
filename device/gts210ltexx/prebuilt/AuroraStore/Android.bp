@@ -1,0 +1,23 @@
+// Aurora Store 4.8.4 (versionCode 76), unmodified APK from https://f-droid.org/repo/com.aurora.store_76.apk
+// sha256 fd9c75d90d0f4a7c132b9b4a5a2cf1992a45e03b8d8ff988b7dcfbc0db2c4d11
+// signer  5c83c7672b929955dc0a1db89a5e6ae4389e2eae7ec939956041694e5815f532 (matches the F-Droid index)
+// Installed as a regular (non-privileged) preinstalled app; it updates itself like any user app.
+android_app_import {
+    name: "AuroraStore",
+    apk: "AuroraStore.apk",
+    presigned: true,
+    preprocessed: true,
+    product_specific: true,
+    dex_preopt: {
+        enabled: false,
+    },
+}
+
+// Default update blacklist (microG's package names), see blacklist.xml.
+prebuilt_etc {
+    name: "AuroraStoreBlacklist",
+    src: "blacklist.xml",
+    filename: "blacklist.xml",
+    sub_dir: "com.aurora.store",
+    product_specific: true,
+}

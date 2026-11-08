@@ -1,0 +1,52 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] usb: gadget: f_fs: do not touch the kiocb after
+ aio_complete()
+
+ffs_user_copy_worker() (added by 3adb350 "usb: gadget: f_fs: backport AIO
+support for FunctionFS endpoints") calls aio_complete() and then clears
+io_data->kiocb->private. In this tree aio_complete() ends with
+aio_put_req(), which for a request whose io_submit() has returned drops
+the last reference and frees the kiocb. The store therefore writes a NULL
+pointer into freed memory, at offset 0x28 of the object (32-bit ARM EABI:
+ki_users 0, ki_filp 4, ki_ctx 8, ki_cancel 12, ki_dtor 16, ki_obj 20,
+ki_user_data 24, ki_pos 32, private 40).
+
+struct kiocb is 96 bytes and its cache is created with
+SLAB_HWCACHE_ALIGN, so with SLUB (no SLUB_DEBUG) it shares slabs with
+kmalloc-128. Whatever is allocated from kmalloc-128 between the free and
+the store gets its word at 0x28 zeroed. adbd issues one AIO request per
+packet, so a logcat stream over adb performs this store thousands of
+times a minute.
+
+Seen on gts210ltexx (2026-11-06): three panics in twelve minutes while
+logcat was streamed over adb, each consistent with that word being
+cleared in a kmalloc-128 object:
+- twice "Unable to handle kernel NULL pointer dereference" in
+  sync_fence_wait() called from s3c_fb_update_regs(): struct sync_fence
+  has pt_list_head.next at 0x28, and the register dump shows the fence
+  ("mali_fence", kref 1) intact except pt_list_head = { NULL, <pt> };
+- once "kernel BUG at drivers/android/binder.c:4301"
+  (BUG_ON(t->buffer == NULL) in binder_thread_read()): struct
+  binder_transaction has buffer at 0x28.
+
+Clear the pointer before completing the request.
+---
+--- a/drivers/usb/gadget/f_fs.c
++++ b/drivers/usb/gadget/f_fs.c
+@@ -827,11 +827,15 @@
+ 		unuse_mm(io_data->mm);
+ 	}
+ 
++	/*
++	 * aio_complete() drops what is normally the last reference to the
++	 * kiocb, so it must not be touched afterwards.
++	 */
++	io_data->kiocb->private = NULL;
+ 	aio_complete(io_data->kiocb, ret, ret);
+ 
+ 	usb_ep_free_request(io_data->ep, io_data->req);
+ 
+-	io_data->kiocb->private = NULL;
+ 	if (io_data->read)
+ 		kfree(io_data->iovec);
+ 	kfree(io_data->buf);

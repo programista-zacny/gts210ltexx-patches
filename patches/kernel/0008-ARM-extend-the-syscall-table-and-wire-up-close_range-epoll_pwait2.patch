@@ -1,0 +1,172 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] ARM: extend the syscall table to 441 and wire up close_range
+ and epoll_pwait2
+
+The table ended at 385 (memfd_create). Add the slots up to 441 with the
+numbers mainline uses on ARM (arch/arm/tools/syscall.tbl), all of them
+sys_ni_syscall except
+  436  close_range
+  441  epoll_pwait2
+A call to one of the new sys_ni_syscall slots returns -ENOSYS, as it did
+before when the number was simply past the end of the table.
+
+Both wired entries get a cond_syscall() line in kernel/sys_ni.c, so this
+patch links (and those two calls keep returning -ENOSYS) when the patches
+that implement them are not applied.
+
+__NR_syscalls becomes 444: 442 entries plus the padding to a multiple of
+four that calls.S adds. entry-common.S compares the syscall number with
+that value as an immediate operand, and 444 (0x6f << 2) is encodable as
+an ARM immediate; the kernel is not built as Thumb-2.
+
+Derived from upstream: the ARM hunks of
+  278a5fbaed89 "open: add close_range()" and its arch wiring
+               (9b4feb630e8e "arch: wire-up close_range()")
+  b0a0c2615f6f "epoll: wire up syscall epoll_pwait2"
+Mainline ARM generates the table from syscall.tbl (since 4.10); 3.10 has
+the hand-written calls.S, so the entries are added there.
+
+Not compile-tested, not assembled.
+
+[combined set, 2026-11-06] REPLACEMENT for the
+canonical patches/kernel/0008 of the same file name. On top of what is
+described above it wires up two more of the new slots,
+  424  pidfd_send_signal
+  434  pidfd_open
+with their __NR_ numbers and their cond_syscall() lines, so this patch
+still links on its own and the two calls return -ENOSYS until "pidfd: add
+pidfd_open(), pidfd_send_signal(), exit polling and waitid(P_PIDFD)" is
+applied and CONFIG_PIDFD is set. These hunks are taken unchanged from
+staging/backport-psi-pidfd 0049, which made them as changes to lines
+this patch adds. They had to move here: with both patches in the tree,
+"git apply --reverse --check" of the canonical 0008 fails, and
+scripts/prepare-tree.sh, which uses that check to skip patches that are
+already applied, would try to apply 0008 again on its second run and
+stop. The first paragraph above should now read "all of them
+sys_ni_syscall except 424, 434, 436 and 441".
+---
+ arch/arm/include/asm/unistd.h      |  2 +-
+ arch/arm/include/uapi/asm/unistd.h |  6 ++++++
+ arch/arm/kernel/calls.S            | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ kernel/sys_ni.c                    |  4 ++++
+ 4 files changed, 67 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/include/asm/unistd.h b/arch/arm/include/asm/unistd.h
+index f325d838..a54b7592 100644
+--- a/arch/arm/include/asm/unistd.h
++++ b/arch/arm/include/asm/unistd.h
+@@ -19,7 +19,7 @@
+  * This may need to be greater than __NR_last_syscall+1 in order to
+  * account for the padding in the syscall table
+  */
+-#define __NR_syscalls  (388)
++#define __NR_syscalls  (444)
+  /*
+  * *NOTE*: This is a ghost syscall private to the kernel.  Only the
+  * __kuser_cmpxchg code in entry-armv.S should be aware of its
+diff --git a/arch/arm/include/uapi/asm/unistd.h b/arch/arm/include/uapi/asm/unistd.h
+index a77a25ff..93959f03 100644
+--- a/arch/arm/include/uapi/asm/unistd.h
++++ b/arch/arm/include/uapi/asm/unistd.h
+@@ -415,6 +415,12 @@
+ 
+ #define __NR_getrandom			(__NR_SYSCALL_BASE+384)
+ #define __NR_memfd_create		(__NR_SYSCALL_BASE+385)
++/* 386 to 435 are not implemented in this tree, except */
++#define __NR_pidfd_send_signal		(__NR_SYSCALL_BASE+424)
++#define __NR_pidfd_open			(__NR_SYSCALL_BASE+434)
++#define __NR_close_range		(__NR_SYSCALL_BASE+436)
++/* 437 to 440 are not implemented in this tree */
++#define __NR_epoll_pwait2		(__NR_SYSCALL_BASE+441)
+ 
+ /*
+  * The following SWIs are ARM private.
+diff --git a/arch/arm/kernel/calls.S b/arch/arm/kernel/calls.S
+index 14c5f64c..cb432cfe 100644
+--- a/arch/arm/kernel/calls.S
++++ b/arch/arm/kernel/calls.S
+@@ -395,6 +395,62 @@
+ 		CALL(sys_seccomp)
+ 		CALL(sys_getrandom)
+ /* 385 */	CALL(sys_memfd_create)
++		CALL(sys_ni_syscall)		/* sys_bpf */
++		CALL(sys_ni_syscall)		/* sys_execveat */
++		CALL(sys_ni_syscall)		/* sys_userfaultfd */
++		CALL(sys_ni_syscall)		/* sys_membarrier */
++/* 390 */	CALL(sys_ni_syscall)		/* sys_mlock2 */
++		CALL(sys_ni_syscall)		/* sys_copy_file_range */
++		CALL(sys_ni_syscall)		/* sys_preadv2 */
++		CALL(sys_ni_syscall)		/* sys_pwritev2 */
++		CALL(sys_ni_syscall)		/* sys_pkey_mprotect */
++/* 395 */	CALL(sys_ni_syscall)		/* sys_pkey_alloc */
++		CALL(sys_ni_syscall)		/* sys_pkey_free */
++		CALL(sys_ni_syscall)		/* sys_statx */
++		CALL(sys_ni_syscall)		/* sys_rseq */
++		CALL(sys_ni_syscall)		/* sys_io_pgetevents */
++/* 400 */	CALL(sys_ni_syscall)		/* sys_migrate_pages */
++		CALL(sys_ni_syscall)		/* sys_kexec_file_load */
++		CALL(sys_ni_syscall)		/* unused */
++		CALL(sys_ni_syscall)		/* sys_clock_gettime64 */
++		CALL(sys_ni_syscall)		/* sys_clock_settime64 */
++/* 405 */	CALL(sys_ni_syscall)		/* sys_clock_adjtime64 */
++		CALL(sys_ni_syscall)		/* sys_clock_getres_time64 */
++		CALL(sys_ni_syscall)		/* sys_clock_nanosleep_time64 */
++		CALL(sys_ni_syscall)		/* sys_timer_gettime64 */
++		CALL(sys_ni_syscall)		/* sys_timer_settime64 */
++/* 410 */	CALL(sys_ni_syscall)		/* sys_timerfd_gettime64 */
++		CALL(sys_ni_syscall)		/* sys_timerfd_settime64 */
++		CALL(sys_ni_syscall)		/* sys_utimensat_time64 */
++		CALL(sys_ni_syscall)		/* sys_pselect6_time64 */
++		CALL(sys_ni_syscall)		/* sys_ppoll_time64 */
++/* 415 */	CALL(sys_ni_syscall)		/* unused */
++		CALL(sys_ni_syscall)		/* sys_io_pgetevents_time64 */
++		CALL(sys_ni_syscall)		/* sys_recvmmsg_time64 */
++		CALL(sys_ni_syscall)		/* sys_mq_timedsend_time64 */
++		CALL(sys_ni_syscall)		/* sys_mq_timedreceive_time64 */
++/* 420 */	CALL(sys_ni_syscall)		/* sys_semtimedop_time64 */
++		CALL(sys_ni_syscall)		/* sys_rt_sigtimedwait_time64 */
++		CALL(sys_ni_syscall)		/* sys_futex_time64 */
++		CALL(sys_ni_syscall)		/* sys_sched_rr_get_interval_time64 */
++		CALL(sys_pidfd_send_signal)
++/* 425 */	CALL(sys_ni_syscall)		/* sys_io_uring_setup */
++		CALL(sys_ni_syscall)		/* sys_io_uring_enter */
++		CALL(sys_ni_syscall)		/* sys_io_uring_register */
++		CALL(sys_ni_syscall)		/* sys_open_tree */
++		CALL(sys_ni_syscall)		/* sys_move_mount */
++/* 430 */	CALL(sys_ni_syscall)		/* sys_fsopen */
++		CALL(sys_ni_syscall)		/* sys_fsconfig */
++		CALL(sys_ni_syscall)		/* sys_fsmount */
++		CALL(sys_ni_syscall)		/* sys_fspick */
++		CALL(sys_pidfd_open)
++/* 435 */	CALL(sys_ni_syscall)		/* sys_clone3 */
++		CALL(sys_close_range)
++		CALL(sys_ni_syscall)		/* sys_openat2 */
++		CALL(sys_ni_syscall)		/* sys_pidfd_getfd */
++		CALL(sys_ni_syscall)		/* sys_faccessat2 */
++/* 440 */	CALL(sys_ni_syscall)		/* sys_process_madvise */
++		CALL(sys_epoll_pwait2)
+ 
+ #ifndef syscalls_counted
+ .equ syscalls_padding, ((NR_syscalls + 3) & ~3) - NR_syscalls
+diff --git a/kernel/sys_ni.c b/kernel/sys_ni.c
+index f34a9810..14d1e1f7 100644
+--- a/kernel/sys_ni.c
++++ b/kernel/sys_ni.c
+@@ -68,6 +68,7 @@ cond_syscall(sys_epoll_create1);
+ cond_syscall(sys_epoll_ctl);
+ cond_syscall(sys_epoll_wait);
+ cond_syscall(sys_epoll_pwait);
++cond_syscall(sys_epoll_pwait2);
+ cond_syscall(compat_sys_epoll_pwait);
+ cond_syscall(sys_semget);
+ cond_syscall(sys_semop);
+@@ -194,6 +195,9 @@ cond_syscall(compat_sys_timerfd_gettime);
+ cond_syscall(sys_eventfd);
+ cond_syscall(sys_eventfd2);
+ cond_syscall(sys_memfd_create);
++cond_syscall(sys_close_range);
++cond_syscall(sys_pidfd_open);
++cond_syscall(sys_pidfd_send_signal);
+ 
+ /* performance counters: */
+ cond_syscall(sys_perf_event_open);

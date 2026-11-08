@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<!-- Default update blacklist for Aurora Store, read from /product/etc/com.aurora.store/blacklist.xml
+     (see data/providers/BlacklistProvider.kt in Aurora Store). microG uses the package names of
+     Google Play services and the Play Store, so Aurora would otherwise offer Google's builds as
+     updates for them. A blacklist the user edits in the app replaces this default. -->
+<map>
+    <string name="PREFERENCE_BLACKLIST">["com.google.android.gms","com.android.vending","com.google.android.gsf"]</string>
+</map>

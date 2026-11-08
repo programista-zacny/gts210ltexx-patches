@@ -1,0 +1,17 @@
+# Kernel patch 0013 (SELinux genfscon labelling for sysfs) makes the existing
+# "genfscon sysfs ..." rules take effect on this 3.10 kernel. Three domains reached nodes
+# only because they were plain "sysfs" before; keep that access under the new labels.
+
+# GPS power enable: /sys/class/sec/gps/GPS_PWR_EN/value goes through
+# /sys/devices/virtual/sec/gps, now sysfs_sec_gps.
+allow gpsd sysfs_sec_gps:dir search;
+
+# hwcomposer reads /sys/class/switch/hdmi/state, now sysfs_switch.
+r_dir_file(hal_graphics_composer_default, sysfs_switch)
+
+# libbauthserver writes /sys/power/cpufreq_max_limit, now sysfs_power_writable.
+allow hal_fingerprint_default sysfs_power_writable:file rw_file_perms;
+
+# init.samsung.rc chowns and chmods nodes that now carry these labels (37 commands failed with
+# "lchown() failed: Permission denied" on the first boot with kernel patch 0013, 2026-11-06).
+allow init { sysfs_power_writable sysfs_sec_switch sysfs_touchscreen_writable sysfs_sensors }:file setattr;

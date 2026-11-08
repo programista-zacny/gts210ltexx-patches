@@ -1,0 +1,61 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] libprocessgroup: take the freezer controller out of the cgroup v2 list
+
+'Revert "libprocessgroup: switch freezer to cgroup v2"' (LOS-24.0
+android_system_core patch 0002) put the cgroup v1 freezer back into
+"Cgroups" (mounted on /dev/freezer) and made the Frozen and Unfrozen
+task profiles join /dev/freezer/frozen and /dev/freezer again. It left
+the freezer in the "Controllers" list of "Cgroups2" as well.
+ReadDescriptorsFromFile() reads "Cgroups" first and "Cgroups2" second
+and keeps one descriptor per controller name, so the v2 entry replaces
+the v1 one: the freezer is a cgroup v2 controller under /sys/fs/cgroup,
+which a kernel without cgroup v2 cannot mount. As a result
+
+- nothing mounts /dev/freezer (the init.rc lines that set up
+  /dev/freezer/frozen fail silently, init does not log ENOENT),
+- the JoinCgroup actions of the Frozen and Unfrozen profiles are dropped
+  in every process ("A JoinCgroup action in the Frozen profile is used
+  for controller freezer in the cgroup v2 hierarchy and will be
+  ignored", twice per process start in the boot logs),
+- the FreezerState attribute cannot be resolved ("No attribute for
+  FreezerState") and system_server reports "Freezer disabled".
+
+Remove the v2 entry. The freezer is then the v1 controller from
+"Cgroups": init mounts it on /dev/freezer in SetupCgroups, the existing
+init.rc lines create /dev/freezer/frozen in state FROZEN and hand its
+cgroup.procs to system, and the Frozen/Unfrozen profiles move a process
+into and out of that cgroup.
+
+This alone does not turn the app freezer on. The framework also needs
+BINDER_FREEZE and BINDER_GET_FROZEN_INFO in the kernel, the kernel has
+to let system_server move other users' processes between freezer
+cgroups and has to let frozen processes be killed (kernel patches
+0014 and 0019-0021 of this project), and frameworks/base has to accept the v1
+state file (patch "Freezer: support the cgroup v1 freezer").
+
+Not built or run.
+
+[combined set, 2026-11-06] Header only: the kernel patch numbers above
+are those of the combined set (staging/backport-freezer: 0020-0025). The
+diff is unchanged.
+---
+ libprocessgroup/profiles/cgroups.json | 7 +------
+ 1 file changed, 1 insertion(+), 6 deletions(-)
+
+diff --git a/libprocessgroup/profiles/cgroups.json b/libprocessgroup/profiles/cgroups.json
+index 542130e..d213663 100644
+--- a/libprocessgroup/profiles/cgroups.json
++++ b/libprocessgroup/profiles/cgroups.json
+@@ -49,11 +49,6 @@
+     "Mode": "0775",
+     "UID": "system",
+     "GID": "system",
+-    "Controllers": [
+-      {
+-        "Controller": "freezer",
+-        "Path": "."
+-      }
+-    ]
++    "Controllers": []
+   }
+ }

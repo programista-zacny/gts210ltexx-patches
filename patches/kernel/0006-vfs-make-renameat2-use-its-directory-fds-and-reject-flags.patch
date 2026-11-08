@@ -1,0 +1,54 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] vfs: make renameat2() use its directory fds and reject flags
+
+The renameat2() entry in this tree is a stub that calls
+sys_renameat(AT_FDCWD, oldname, AT_FDCWD, newname): it ignores both
+directory file descriptors and the flags argument.
+
+- renameat2(dirfd, "a", dirfd, "b", 0) with relative names renames in the
+  current working directory instead of in dirfd, so it fails with ENOENT
+  or moves an unrelated file. bionic implements rename() and renameat()
+  on top of renameat2() these days, which is why the LineageOS port
+  carries "Revert "Rewrite renameat()."" in bionic.
+- renameat2(..., RENAME_NOREPLACE) silently replaces the target and
+  RENAME_EXCHANGE silently does a plain rename, where the caller asked
+  for the opposite and gets "success" back.
+
+Pass the directory fds through, and return -EINVAL when any flag is set.
+That is what mainline does for a filesystem that has no ->rename2
+(vfs_rename() in 3.15: "if (flags && !old_dir->i_op->rename2) return
+-EINVAL"), and no filesystem here has one. With flags == 0 the call is
+now exactly renameat().
+
+Derived from upstream:
+  520c8b16505 "vfs: add renameat2 syscall"   (syscall semantics only;
+              the ->rename2 plumbing and the flags themselves are not
+              backported)
+
+Not compile-tested.
+---
+ fs/namei.c | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/fs/namei.c b/fs/namei.c
+index af5bf2a..e392c27 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -4118,7 +4118,16 @@ exit:
+ SYSCALL_DEFINE5(renameat2, int, olddfd, const char __user *, oldname,
+ 		int, newdfd, const char __user *, newname, unsigned int, flags)
+ {
+-	return sys_renameat(AT_FDCWD, oldname, AT_FDCWD, newname);
++	/*
++	 * No filesystem in this tree implements ->rename2, so none of
++	 * RENAME_NOREPLACE, RENAME_EXCHANGE or RENAME_WHITEOUT can be
++	 * honoured. Mainline returns -EINVAL for a filesystem without
++	 * ->rename2 when flags are given, and callers fall back on that.
++	 */
++	if (flags)
++		return -EINVAL;
++
++	return sys_renameat(olddfd, oldname, newdfd, newname);
+ }
+ 
+ SYSCALL_DEFINE2(rename, const char __user *, oldname, const char __user *, newname)

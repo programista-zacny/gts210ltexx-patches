@@ -1,0 +1,77 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] init: fix the commands and triggers vendor_init is denied
+
+(From staging/fixes-3, patches/gts2-common/0006; that file has no header.)
+
+[combined set, 2026-11-06] Changed against the staged file in two ways:
+
+- The comment in front of the two persist.vendor.logcat.enabled actions
+  said that the persistentLogging service "has no disabled option, so it
+  starts with class core on every boot". The next patch ("init: keep
+  persistent logcat to /data off by default") gives the service that
+  option, so the sentence was wrong as soon as both were applied. The
+  comment now describes both cases and lists what each value of the
+  property does at boot. No command changed.
+
+- The last hunk carries one line of leading context instead of three.
+  The next patch inserts its lines directly above that hunk; with three
+  context lines "git apply --reverse --check" of this patch fails on a
+  tree that has both, and scripts/prepare-tree.sh, which uses that check
+  to skip patches that are already applied, would try to apply this one
+  again on its second run and stop.
+---
+ rootdir/etc/init.universal5433.rc | 21 +++++++++++++++------
+ 1 file changed, 15 insertions(+), 6 deletions(-)
+
+diff --git a/rootdir/etc/init.universal5433.rc b/rootdir/etc/init.universal5433.rc
+index 2216ad6..cba69d0 100644
+--- a/rootdir/etc/init.universal5433.rc
++++ b/rootdir/etc/init.universal5433.rc
+@@ -183,9 +183,10 @@ on boot
+ 
+     #setprop ro.radio.noril yes
+ 
+-    # Set up kernel tracing, but disable it by default
++    # Set up kernel tracing. Tracing itself is switched off by /system/etc/init/atrace.rc at
++    # late-init ("write /sys/kernel/debug/tracing/tracing_on 0", run in init's own domain); the
++    # same write used to be repeated here, where vendor_init is denied it on every boot.
+     chmod 0222 /sys/kernel/debug/tracing/trace_marker
+-    write /sys/kernel/debug/tracing/tracing_on 0
+ 
+ # Switch Device
+     chown system radio /sys/class/sec/switch/uart_en
+@@ -523,7 +524,9 @@ on late-fs
+     chown system radio /sys/class/sensors/grip_sensor_wifi/threshold
+     chown system radio /sys/class/sensors/grip_sensor_wifi/onoff
+ 
+-    chown system radio /sys/bus/iio/devices/iio:device10
++    # (No chown/chmod of /sys/bus/iio/devices/iio:device10 itself: that path is a symlink, init
++    # does not follow it for either command, and vendor_init is denied setattr on it. The nodes
++    # below are reached through the link and are set as before.)
+     chown system radio /sys/bus/iio/devices/iio:device10/buffer
+     chown system radio /sys/bus/iio/devices/iio:device10/buffer/enable
+     chown system radio /sys/bus/iio/devices/iio:device10/buffer/length
+@@ -533,7 +536,6 @@ on late-fs
+     chown system radio /sys/bus/iio/devices/iio:device10/scan_elements/in_timestamp_en
+     chown system radio /sys/bus/iio/devices/iio:device10/scan_elements
+ 
+-    chmod 0760 /sys/bus/iio/devices/iio:device10
+     chmod 0760 /sys/bus/iio/devices/iio:device10/buffer
+     chmod 0760 /sys/bus/iio/devices/iio:device10/buffer/enable
+     chmod 0760 /sys/bus/iio/devices/iio:device10/buffer/length
+@@ -674,6 +676,13 @@
+ 
+-on property:persist.logcat.enabled=1
++# Note: without a "disabled" option the service above starts with class core on every boot; with
++# one (see the service) it runs only while the property below is 1.
++# The switch used to be persist.logcat.enabled, which init refuses as a trigger in a vendor script
++# ("unexported property trigger", vendor_init may not read it), so both actions were dropped at
++# parse time and the service could not be switched at all. A persist.vendor. property is accepted:
++#   setprop persist.vendor.logcat.enabled 1   starts it now, and again at every boot
++#   setprop persist.vendor.logcat.enabled 0   stops it now, and again at every boot
++on property:persist.vendor.logcat.enabled=1
+     start persistentLogging
+ 
+-on property:persist.logcat.enabled=0
++on property:persist.vendor.logcat.enabled=0
+     stop persistentLogging

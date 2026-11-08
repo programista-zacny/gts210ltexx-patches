@@ -1,0 +1,126 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] binder: fix two use-after-frees in binder_free_transaction()
+
+[combined set, 2026-11-06] This file is two consecutive patches of
+staging/backport-freezer folded into one. The diff below is the sum of
+the two, unchanged; their headers follow in their original order.
+
+Why folded: the second patch changes lines the first one adds, so with
+both in the tree "git apply --reverse --check" of the first fails and
+scripts/prepare-tree.sh, which uses that check to skip patches that are
+already applied, stops on its second run (see the note in "binder:
+BINDER_FREEZE and BINDER_GET_FROZEN_INFO ioctls, with the freeze race
+fix"). The two separate files remain in
+staging/backport-freezer/patches/kernel (0026, 0027).
+
+======== 1/2: "binder: fix UAF in binder_thread_release()" (staging/backport-freezer 0026) ========
+
+When a thread exits, binder_thread_release() walks its transaction stack
+and, holding the transaction's lock, detaches every transaction from the
+thread: for one the thread was serving it clears t->to_proc, t->to_thread
+and t->buffer, then reads t->to_parent and drops the lock.
+
+binder_free_transaction() read t->to_proc without that lock. A second
+thread can get there for the same transaction while the first is in the
+middle of the steps above: binder_send_failed_reply() walks up
+t->from_parent when the thread that should receive a failed reply is
+gone, which is the case when the exiting thread had called out from
+inside the transaction it was serving and the reply to that nested call
+arrives now. If it reads t->to_proc after it was cleared, it takes no
+proc lock at all and frees the transaction at once, and
+binder_thread_release() goes on to write to_thread, buffer and the lock
+word of freed memory (a 96 byte object from kmalloc-128 here).
+
+Read t->to_proc under the transaction lock. binder_free_transaction()
+then waits until binder_thread_release() is done with the transaction.
+This is also what the comment on the lock in struct binder_transaction
+says ("protects @from, @to_proc, and @to_thread").
+
+Derived from upstream:
+  114a116aaa5f "binder: fix UAF in binder_thread_release()"
+
+Applies as upstream. The function has two more lines here than in the
+upstream context: the outstanding_txns accounting of "binder:
+BINDER_FREEZE ioctl" follows directly, and upstream's
+binder_txn_latency_free() does not exist in this tree.
+
+Compile-tested (GCC 4.9, lineage_gts210ltexx_defconfig); not run on the
+device.
+
+======== 2/2: "binder: fix UAF in binder_free_transaction()" (staging/backport-freezer 0027) ========
+
+binder_free_transaction() takes t->to_proc, drops the transaction lock
+and then acquires the inner lock of that process to update its
+bookkeeping (t->buffer->transaction and, since "binder: BINDER_FREEZE
+ioctl", outstanding_txns and the freeze_wait wakeup). The transaction
+holds no reference on the process. When the caller is not that process
+itself - binder_send_failed_reply() walking up t->from_parent after the
+thread that should get the failed reply has gone - the target process
+can finish dying and be freed by binder_deferred_func() in between, and
+the inner lock is then taken in freed memory (struct binder_proc is a
+kmalloc-512 object here).
+
+Pin the transaction's target thread while its process is used: a
+binder_thread holds a temporary reference on its binder_proc from
+binder_thread_release() until it is freed, and it is not freed while
+its own tmp_ref is raised, so the process cannot go away. t->to_thread
+is read under the transaction lock together with t->to_proc; both are
+cleared together by binder_thread_release().
+
+A transaction without a target thread needs no pin: it is either one
+that binder_thread_release() already detached (to_proc is NULL as well)
+or an undelivered one. Those are only freed on behalf of their own
+target process, by one of its threads in binder_thread_read() or from
+its todo lists in binder_release_work(), where the process is the
+caller's or is pinned by binder_deferred_release(). A sender that fails
+to queue a transaction frees it with kfree() and does not come here.
+
+Derived from upstream:
+  f223d27a546c "binder: fix UAF in binder_free_transaction()"
+
+Applies as upstream on top of the previous patch; thread->tmp_ref is an
+atomic_t and binder_thread_dec_tmpref() exists here as in mainline.
+
+Compile-tested (GCC 4.9, lineage_gts210ltexx_defconfig); not run on the
+device.
+---
+ drivers/android/binder.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/android/binder.c b/drivers/android/binder.c
+index 2450f609..d0db3428 100644
+--- a/drivers/android/binder.c
++++ b/drivers/android/binder.c
+@@ -2122,7 +2122,20 @@ static struct binder_thread *binder_get_txn_from_and_acq_inner(
+ 
+ static void binder_free_transaction(struct binder_transaction *t)
+ {
+-	struct binder_proc *target_proc = t->to_proc;
++	struct binder_thread *target_thread;
++	struct binder_proc *target_proc;
++
++	spin_lock(&t->lock);
++	target_proc = t->to_proc;
++	target_thread = t->to_thread;
++	/*
++	 * Pin target_thread to keep target_proc alive. Undelivered
++	 * transactions with !target_thread are safe, as target_proc
++	 * can only be the current context there.
++	 */
++	if (target_thread)
++		atomic_inc(&target_thread->tmp_ref);
++	spin_unlock(&t->lock);
+ 
+ 	if (target_proc) {
+ 		binder_inner_proc_lock(target_proc);
+@@ -2136,6 +2149,10 @@ static void binder_free_transaction(struct binder_transaction *t)
+ 			t->buffer->transaction = NULL;
+ 		binder_inner_proc_unlock(target_proc);
+ 	}
++
++	if (target_thread)
++		binder_thread_dec_tmpref(target_thread);
++
+ 	/*
+ 	 * If the transaction has no target_proc, then
+ 	 * t->buffer->transaction has already been cleared.

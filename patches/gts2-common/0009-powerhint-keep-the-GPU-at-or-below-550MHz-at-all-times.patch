@@ -1,0 +1,171 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] powerhint: keep the GPU at or below 550MHz at all times
+
+ALTERNATIVE to "powerhint: keep the GPU at or below 550MHz during LAUNCH"
+(patches/gts2-common/0009 of the combined set). Use one or the other;
+both are numbered 0009 and apply on top of 0002-0008.
+
+To use it (from the project root; the two files have different names,
+so the other one has to be deleted, and prepare-tree.sh stops if both
+are present):
+  rm patches/gts2-common/0009-powerhint-keep-the-GPU-at-or-below-550MHz-during-LAUNCH.patch
+  cp staging/gpu-permanent-cap/patches/gts2-common/0009-*.patch patches/gts2-common/
+If the tree already has the LAUNCH patch applied, revert it first, before
+the rm (and the same the other way round when switching back):
+  git -C lineage/device/samsung/gts2-common apply -R \
+      "$PWD/patches/gts2-common/0009-powerhint-keep-the-GPU-at-or-below-550MHz-during-LAUNCH.patch"
+
+The Mali platform code ties a big-cluster maximum to the GPU clock
+(gpu_exynos5433.c, last column of gpu_dvfs_table_default: 1300000 at 700
+and 600MHz, 1800000 at 550, 500 and 420MHz, none below) and posts it as a
+PM QoS request whenever it sets the GPU clock (gpu_pmqos.c). At 600MHz or
+more the big cores are therefore held at 1.3GHz. The LAUNCH-only patch
+lifts that for the five seconds of an app launch. Measurements of
+2026-11-06 (logs/gpu-cap-scroll-20261106-191308/30-analysis.txt) show
+that the same cap applied permanently is never worse for scrolling and
+animations and slightly better wherever the power HAL held a 600MHz
+minimum (EXPENSIVE_RENDERING). The owner does not play games on this
+tablet, which is what the 600 and 700MHz steps would be for.
+
+What changes, in the power HAL configuration only (no kernel change):
+
+- GPUMaxFreq (dvfs_max_lock): the default becomes "550" and no action
+  uses the node any more. With ResetOnInit the HAL writes 550 once when
+  it starts. The GPUMaxFreq actions of SUSTAINED_PERFORMANCE (600) and
+  FIXED_PERFORMANCE (700) are removed, and LAUNCH needs none.
+- GPUMinFreq (dvfs_min_lock): "600" is replaced by "550", and
+  EXPENSIVE_RENDERING (was 600) and FIXED_PERFORMANCE (was 700, which the
+  kernel clamped to 600) ask for 550, so the minimum is never above the
+  maximum. The resting minimum stays at 500 (default, last index):
+  releasing it made scrolling less smooth (measured the same day).
+- The "Comments" of both nodes describe this, including the limits below.
+
+Checked in the kernel source: 550 is a row of the DVFS table, which both
+store handlers require (set_max_lock_dvfs/set_min_lock_dvfs in
+gpu_custom_interface.c reject a clock that gpu_dvfs_get_level() does not
+find between the minimum and maximum clock); the minimum handler also
+clamps to gpu_max_clock_limit, 600 here, so 550 passes unchanged; and
+gpu_check_target_clock() applies the minimum lock first and the maximum
+lock last. The 550 row has cpu_max_freq 1800000, the 600 row 1300000.
+gpu_dvfs_decide_max_clock() can lower the maximum clock of a chip by its
+table version; a chip limited below 550 would reject the write. This
+tablet accepts it: the measurements above were made with the cap set.
+
+Two known limits:
+- From kernel boot until the power HAL starts the GPU is not capped.
+- The HAL writes the value once. A later write to dvfs_max_lock by
+  something else is not corrected until the HAL restarts.
+
+Deviation from the plain form of this change: GPUMaxFreq is not reduced
+to the single value "550". Its "0" and "700" entries, and "0" and "700"
+of GPUMinFreq, stay in the lists although no action uses them (the
+default index of GPUMaxFreq is 2). They are the three context lines of
+the "Path" to "Paths" hunks of patch 0002. With them gone, "git apply
+--reverse --check" of 0002 fails on a tree that has both patches, and
+scripts/prepare-tree.sh, which uses that check to skip patches that are
+already applied, stops on its second run (tested: the single-value form
+makes 0002 fail that check, this form does not). The HAL behaves the
+same either way: it writes the default once and nothing can request the
+unused values. The single-value form is possible only folded into 0002.
+
+libperfmgr drops every action when one names a value its node does not
+have (HintManager::ParseActions clears the result and the HAL gets no
+configuration), which is why the two GPUMaxFreq actions are removed in
+the same patch that takes "600" out of the lists.
+
+Validated: JSON; the rules of HintManager::ParseNodes/ParseActions
+(11 nodes, 49 actions, every action value defined in its node, one
+action per node and hint); applies after 0002-0008 and leaves every
+gts2-common patch reverse-applicable. Not built, not run on the device.
+---
+ configs/powerhint.json | 39 +++++++++++++++------------------------
+ 1 file changed, 15 insertions(+), 24 deletions(-)
+
+diff --git a/configs/powerhint.json b/configs/powerhint.json
+index cf2f059..e28b77f 100644
+--- a/configs/powerhint.json
++++ b/configs/powerhint.json
+@@ -79,14 +79,17 @@
+       "Values": [
+         "0",
+         "700",
+-        "600"
++        "550"
+       ],
+       "Comments": [
+-        "0 => unlocked (up to 700MHz)",
+-        "700 => 700MHz",
+-        "600 => 600MHz"
++        "550 => 550MHz, the default (DefaultIndex 2) and the only value in use.",
++        "The GPU is kept at or below 550MHz at all times: this node has no action and its default is written once when the power HAL starts (ResetOnInit).",
++        "Reason: the kernel (gpu_exynos5433.c, gpu_pmqos.c) limits the big cores to 1.3GHz while the GPU clock is 600MHz or more and to 1.8GHz at 550MHz and below. Measured 2026-11-06 (logs/gpu-cap-scroll-20261106-191308): with the cap, scrolling and animations are never worse and slightly better wherever a 600MHz minimum was held.",
++        "Limit 1: from kernel boot until the power HAL starts the GPU is not capped.",
++        "Limit 2: the HAL writes the value once. If something else writes dvfs_max_lock later, the cap is not put back until the HAL restarts.",
++        "0 (unlocked) and 700 are used by no action. The two lines stay only because they are the context of the Paths change in patch 0002: without them 'git apply --reverse --check' of 0002 fails and scripts/prepare-tree.sh stops on its second run."
+       ],
+-      "DefaultIndex": 0,
++      "DefaultIndex": 2,
+       "ResetOnInit": true
+     },
+     {
+@@ -97,14 +100,14 @@
+       "Values": [
+         "0",
+         "700",
+-        "600",
++        "550",
+         "500"
+       ],
+       "Comments": [
+-        "0 => unlocked (down to 266MHz)",
+-        "700 => 700MHz",
+-        "600 => 600MHz",
+-        "500 => 500MHz"
++        "0 => unlocked (down to 266MHz), used by no action",
++        "700 => used by no action; kept, like 0, only as context of patch 0002 (see GPUMaxFreq). 600 is gone.",
++        "550 => 550MHz, for EXPENSIVE_RENDERING and FIXED_PERFORMANCE; never above the 550MHz of GPUMaxFreq",
++        "500 => 500MHz, the resting minimum (default, last index). Measured 2026-11-06: releasing it makes scrolling less smooth."
+       ],
+       "ResetOnInit": true
+     },
+@@ -172,12 +175,6 @@
+       "Duration": 0,
+       "Value": "900000"
+     },
+-    {
+-      "PowerHint": "SUSTAINED_PERFORMANCE",
+-      "Node": "GPUMaxFreq",
+-      "Duration": 0,
+-      "Value": "600"
+-    },
+     {
+       "PowerHint": "INTERACTION",
+       "Node": "CPULittleClusterMinFreq",
+@@ -320,7 +317,7 @@
+       "PowerHint": "EXPENSIVE_RENDERING",
+       "Node": "GPUMinFreq",
+       "Duration": 0,
+-      "Value": "600"
++      "Value": "550"
+     },
+     {
+       "PowerHint": "ML_ACC",
+@@ -352,17 +349,11 @@
+       "Duration": 0,
+       "Value": "1300000"
+     },
+-    {
+-      "PowerHint": "FIXED_PERFORMANCE",
+-      "Node": "GPUMaxFreq",
+-      "Duration": 0,
+-      "Value": "700"
+-    },
+     {
+       "PowerHint": "FIXED_PERFORMANCE",
+       "Node": "GPUMinFreq",
+       "Duration": 0,
+-      "Value": "700"
++      "Value": "550"
+     },
+     {
+       "PowerHint": "Flipendo",

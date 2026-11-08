@@ -1,0 +1,153 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] vfs: add d_tmpfile() and let O_TMPFILE files be linked
+
+The tree has the open() side of O_TMPFILE (do_tmpfile(), the flag checks
+in build_open_flags()) but not the two pieces a filesystem and userspace
+need to use it:
+
+- d_tmpfile(), the helper every ->tmpfile() implementation calls to turn
+  the freshly allocated inode into an unlinked, opened one. Without it no
+  filesystem here implements ->tmpfile, so open(dir, O_TMPFILE) always
+  fails with EOPNOTSUPP.
+- I_LINKABLE. vfs_link() refuses an inode with i_nlink == 0 (ENOENT), so
+  a temporary file could never be given a name with
+  linkat(AT_FDCWD, "/proc/self/fd/N", ..., AT_SYMLINK_FOLLOW), which is
+  how Android's tombstoned publishes a tombstone. do_tmpfile() now marks
+  the inode linkable unless O_EXCL was given, vfs_link2() accepts such
+  an inode and clears the mark once it has a name, and inc_nlink() no
+  longer warns about the 0 -> 1 transition for it.
+
+No filesystem gains ->tmpfile here; see the ext4 patch.
+
+Derived from upstream:
+  60545d0d4610 "[O_TMPFILE] it's still short a few helpers, but
+               infrastructure should be OK now..."  (d_tmpfile() only;
+               do_tmpfile() is already in the tree, the ext2, minix and
+               shmem implementations are not taken)
+  f4e0c30c191f "allow the temp files created by open() to be linked to"
+
+Adapted for 3.10.108:
+- d_alias is dentry->d_u.d_alias in this tree (the 3.10.y backport of
+  the d_child/d_alias change), so the BUG_ON in d_tmpfile() uses that.
+- vfs_link() is vfs_link2() here (vfsmount-aware variant); the change is
+  made there.
+- I_LINKABLE takes bit 10 of i_state as upstream; bits 0-9 are the only
+  ones used in this tree.
+
+Not compile-tested.
+---
+ fs/dcache.c            | 16 ++++++++++++++++
+ fs/inode.c             |  4 +++-
+ fs/namei.c             | 16 ++++++++++++++--
+ include/linux/dcache.h |  2 ++
+ include/linux/fs.h     |  1 +
+ 5 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/fs/dcache.c b/fs/dcache.c
+index dcb875b..102fdca 100644
+--- a/fs/dcache.c
++++ b/fs/dcache.c
+@@ -3153,6 +3153,22 @@ EXPORT_SYMBOL(names_cachep);
+ 
+ EXPORT_SYMBOL(d_genocide);
+ 
++void d_tmpfile(struct dentry *dentry, struct inode *inode)
++{
++	inode_dec_link_count(inode);
++	BUG_ON(dentry->d_name.name != dentry->d_iname ||
++		!hlist_unhashed(&dentry->d_u.d_alias) ||
++		!d_unlinked(dentry));
++	spin_lock(&dentry->d_parent->d_lock);
++	spin_lock_nested(&dentry->d_lock, DENTRY_D_LOCK_NESTED);
++	dentry->d_name.len = sprintf(dentry->d_iname, "#%llu",
++				(unsigned long long)inode->i_ino);
++	spin_unlock(&dentry->d_lock);
++	spin_unlock(&dentry->d_parent->d_lock);
++	d_instantiate(dentry, inode);
++}
++EXPORT_SYMBOL(d_tmpfile);
++
+ void __init vfs_caches_init_early(void)
+ {
+ 	dcache_init_early();
+diff --git a/fs/inode.c b/fs/inode.c
+index 8ebb4c8..8bfe490 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -348,8 +348,10 @@ EXPORT_SYMBOL(set_nlink);
+  */
+ void inc_nlink(struct inode *inode)
+ {
+-	if (WARN_ON(inode->i_nlink == 0))
++	if (unlikely(inode->i_nlink == 0)) {
++		WARN_ON(!(inode->i_state & I_LINKABLE));
+ 		atomic_long_dec(&inode->i_sb->s_remove_count);
++	}
+ 
+ 	inode->__i_nlink++;
+ }
+diff --git a/fs/namei.c b/fs/namei.c
+index e392c27..c88b700 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -3017,8 +3017,14 @@ static int do_tmpfile(int dfd, struct filename *pathname,
+ 	if (error)
+ 		goto out2;
+ 	error = open_check_o_direct(file);
+-	if (error)
++	if (error) {
+ 		fput(file);
++	} else if (!(op->open_flag & O_EXCL)) {
++		struct inode *inode = file_inode(file);
++		spin_lock(&inode->i_lock);
++		inode->i_state |= I_LINKABLE;
++		spin_unlock(&inode->i_lock);
++	}
+ out2:
+ 	mnt_drop_write(nd->path.mnt);
+ out:
+@@ -3756,12 +3762,18 @@ int vfs_link2(struct vfsmount *mnt, struct dentry *old_dentry, struct inode *dir
+ 
+ 	mutex_lock(&inode->i_mutex);
+ 	/* Make sure we don't allow creating hardlink to an unlinked file */
+-	if (inode->i_nlink == 0)
++	if (inode->i_nlink == 0 && !(inode->i_state & I_LINKABLE))
+ 		error =  -ENOENT;
+ 	else if (max_links && inode->i_nlink >= max_links)
+ 		error = -EMLINK;
+ 	else
+ 		error = dir->i_op->link(old_dentry, dir, new_dentry);
++
++	if (!error && (inode->i_state & I_LINKABLE)) {
++		spin_lock(&inode->i_lock);
++		inode->i_state &= ~I_LINKABLE;
++		spin_unlock(&inode->i_lock);
++	}
+ 	mutex_unlock(&inode->i_mutex);
+ 	if (!error)
+ 		fsnotify_link(dir, inode, new_dentry);
+diff --git a/include/linux/dcache.h b/include/linux/dcache.h
+index 325116e..6f512b6 100644
+--- a/include/linux/dcache.h
++++ b/include/linux/dcache.h
+@@ -248,6 +248,8 @@ extern struct dentry * d_make_root(struct inode *);
+ /* <clickety>-<click> the ramfs-type tree */
+ extern void d_genocide(struct dentry *);
+ 
++extern void d_tmpfile(struct dentry *, struct inode *);
++
+ extern struct dentry *d_find_alias(struct inode *);
+ extern void d_prune_aliases(struct inode *);
+ 
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 0a285e8..2e90395 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1823,6 +1823,7 @@ struct super_operations {
+ #define I_REFERENCED		(1 << 8)
+ #define __I_DIO_WAKEUP		9
+ #define I_DIO_WAKEUP		(1 << I_DIO_WAKEUP)
++#define I_LINKABLE		(1 << 10)
+ 
+ #define I_DIRTY (I_DIRTY_SYNC | I_DIRTY_DATASYNC | I_DIRTY_PAGES)
+ 

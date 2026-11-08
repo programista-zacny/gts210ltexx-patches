@@ -1,0 +1,31 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] aio: do not drop reqs_active twice for cancelled requests
+
+aio_complete() decrements ctx->reqs_active in the KIOCB_CANCELLED branch and
+then again at put_rq, which every request passes through. A cancelled
+request therefore takes the counter down by two for the one increment in
+aio_get_req(). With the eight reads adbd keeps queued on FunctionFS,
+free_ioctx() would see reqs_active reach zero after half of the cancelled
+requests have completed, free the ring and the kioctx while the remaining
+completions still dereference it, and then trip
+WARN_ON(reqs_active < 0).
+
+The only users of cancellation in this tree are gadgetfs and FunctionFS.
+Let cancelled requests take the common decrement at put_rq.
+---
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -621,8 +621,11 @@
+ 	 */
+ 	if (unlikely(xchg(&iocb->ki_cancel,
+ 			  KIOCB_CANCELLED) == KIOCB_CANCELLED)) {
+-		atomic_dec(&ctx->reqs_active);
+-		/* Still need the wake_up in case free_ioctx is waiting */
++		/*
++		 * reqs_active is dropped at put_rq below, like for any other
++		 * request. Still need the wake_up in case free_ioctx is
++		 * waiting.
++		 */
+ 		goto put_rq;
+ 	}
+ 

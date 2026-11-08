@@ -1,0 +1,30 @@
+diff --git a/libs/gui/BLASTBufferQueue.cpp b/libs/gui/BLASTBufferQueue.cpp
+index 27eebfc..8000691 100644
+--- a/libs/gui/BLASTBufferQueue.cpp
++++ b/libs/gui/BLASTBufferQueue.cpp
+@@ -75,25 +75,6 @@ inline const char* boolToString(bool b) {
+ 
+ } // namespace
+ 
+-inline int epoll_wait_with_timeout(int epfd, struct epoll_event* events, int maxevents,
+-                                   const timespec* timeout) {
+-    static bool useEpollWait = false;
+-    if (!useEpollWait) {
+-        int ret = epoll_pwait2(epfd, events, maxevents, timeout, nullptr);
+-        if (ret == -1 && errno == ENOSYS) {
+-            useEpollWait = true;
+-        } else {
+-            return ret;
+-        }
+-    }
+-
+-    int timeoutMs = -1;
+-    if (timeout) {
+-        timeoutMs = (timeout->tv_sec * 1000) + (timeout->tv_nsec / 1000000);
+-    }
+-    return epoll_wait(epfd, events, maxevents, timeoutMs);
+-}
+-
+ namespace android {
+ 
+ // Macros to include adapter info in log messages

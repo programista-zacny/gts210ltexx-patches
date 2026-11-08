@@ -1,0 +1,215 @@
+diff --git a/configs/powerhint.json b/configs/powerhint.json
+index aa4a7eb..cf2f059 100644
+--- a/configs/powerhint.json
++++ b/configs/powerhint.json
+@@ -2,7 +2,9 @@
+   "Nodes": [
+     {
+       "Name": "CPULittleClusterMaxFreq",
+-      "Path": "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
++      "Paths": [
++        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq"
++      ],
+       "Values": [
+         "9999999",
+         "1300000",
+@@ -17,9 +19,11 @@
+     },
+     {
+       "Name": "CPULittleClusterMinFreq",
+-      "Path": "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq",
++      "Paths": [
++        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq"
++      ],
+       "Values": [
+-        "9999999",
++        "1300000",
+         "1100000",
+         "400000"
+       ],
+@@ -27,7 +31,9 @@
+     },
+     {
+       "Name": "CPUBigClusterMaxFreq",
+-      "Path": "/sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq",
++      "Paths": [
++        "/sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq"
++      ],
+       "Values": [
+         "9999999",
+         "1900000",
+@@ -42,16 +48,34 @@
+     },
+     {
+       "Name": "CPUBigClusterMinFreq",
+-      "Path": "/sys/devices/system/cpu/cpu4/cpufreq/scaling_min_freq",
++      "Paths": [
++        "/sys/devices/system/cpu/cpu4/cpufreq/scaling_min_freq"
++      ],
+       "Values": [
+-        "9999999",
++        "1900000",
+         "700000"
+       ],
+       "ResetOnInit": true
+     },
++    {
++      "Name": "CPUFreqMinLimit",
++      "Paths": [
++        "/sys/power/cpufreq_min_limit"
++      ],
++      "Values": [
++        "1900000",
++        "1600000",
++        "1300000",
++        "-1"
++      ],
++      "DefaultIndex": 3,
++      "ResetOnInit": true
++    },
+     {
+       "Name": "GPUMaxFreq",
+-      "Path": "/sys/devices/14ac0000.mali/dvfs_max_lock",
++      "Paths": [
++        "/sys/devices/14ac0000.mali/dvfs_max_lock"
++      ],
+       "Values": [
+         "0",
+         "700",
+@@ -67,7 +91,9 @@
+     },
+     {
+       "Name": "GPUMinFreq",
+-      "Path": "/sys/devices/14ac0000.mali/dvfs_min_lock",
++      "Paths": [
++        "/sys/devices/14ac0000.mali/dvfs_min_lock"
++      ],
+       "Values": [
+         "0",
+         "700",
+@@ -84,7 +110,9 @@
+     },
+     {
+       "Name": "PMQoSCpuDmaLatency",
+-      "Path": "/dev/cpu_dma_latency",
++      "Paths": [
++        "/dev/cpu_dma_latency"
++      ],
+       "Values": [
+         "61",
+         "100"
+@@ -93,7 +121,9 @@
+     },
+     {
+       "Name": "PowerHALMainState",
+-      "Path": "vendor.powerhal.state",
++      "Paths": [
++        "vendor.powerhal.state"
++      ],
+       "Values": [
+         "SUSTAINED_PERFORMANCE",
+         ""
+@@ -102,7 +132,9 @@
+     },
+     {
+       "Name": "PowerHALAudioState",
+-      "Path": "vendor.powerhal.audio",
++      "Paths": [
++        "vendor.powerhal.audio"
++      ],
+       "Values": [
+         "AUDIO_STREAMING_LOW_LATENCY",
+         ""
+@@ -111,7 +143,9 @@
+     },
+     {
+       "Name": "PowerHALRenderingState",
+-      "Path": "vendor.powerhal.rendering",
++      "Paths": [
++        "vendor.powerhal.rendering"
++      ],
+       "Values": [
+         "EXPENSIVE_RENDERING",
+         ""
+@@ -158,15 +192,15 @@
+     },
+     {
+       "PowerHint": "LAUNCH",
+-      "Node": "CPUBigClusterMinFreq",
++      "Node": "CPUFreqMinLimit",
+       "Duration": 5000,
+-      "Value": "9999999"
++      "Value": "1600000"
+     },
+     {
+       "PowerHint": "LAUNCH",
+       "Node": "CPULittleClusterMinFreq",
+       "Duration": 5000,
+-      "Value": "9999999"
++      "Value": "1300000"
+     },
+     {
+       "PowerHint": "LAUNCH",
+@@ -188,9 +222,9 @@
+     },
+     {
+       "PowerHint": "CAMERA_LAUNCH",
+-      "Node": "CPUBigClusterMinFreq",
++      "Node": "CPUFreqMinLimit",
+       "Duration": 1000,
+-      "Value": "9999999"
++      "Value": "1600000"
+     },
+     {
+       "PowerHint": "CAMERA_LAUNCH",
+@@ -202,7 +236,7 @@
+       "PowerHint": "CAMERA_LAUNCH",
+       "Node": "CPULittleClusterMinFreq",
+       "Duration": 1000,
+-      "Value": "9999999"
++      "Value": "1300000"
+     },
+     {
+       "PowerHint": "CAMERA_LAUNCH",
+@@ -236,9 +270,9 @@
+     },
+     {
+       "PowerHint": "CAMERA_SHOT",
+-      "Node": "CPUBigClusterMinFreq",
++      "Node": "CPUFreqMinLimit",
+       "Duration": 1000,
+-      "Value": "9999999"
++      "Value": "1600000"
+     },
+     {
+       "PowerHint": "CAMERA_SHOT",
+@@ -250,7 +284,7 @@
+       "PowerHint": "CAMERA_SHOT",
+       "Node": "CPULittleClusterMinFreq",
+       "Duration": 1000,
+-      "Value": "9999999"
++      "Value": "1300000"
+     },
+     {
+       "PowerHint": "CAMERA_SHOT",
+@@ -302,9 +336,9 @@
+     },
+     {
+       "PowerHint": "FIXED_PERFORMANCE",
+-      "Node": "CPUBigClusterMinFreq",
++      "Node": "CPUFreqMinLimit",
+       "Duration": 0,
+-      "Value": "9999999"
++      "Value": "1900000"
+     },
+     {
+       "PowerHint": "FIXED_PERFORMANCE",
+@@ -316,7 +350,7 @@
+       "PowerHint": "FIXED_PERFORMANCE",
+       "Node": "CPULittleClusterMinFreq",
+       "Duration": 0,
+-      "Value": "9999999"
++      "Value": "1300000"
+     },
+     {
+       "PowerHint": "FIXED_PERFORMANCE",

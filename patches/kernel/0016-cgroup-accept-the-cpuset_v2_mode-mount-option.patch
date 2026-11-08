@@ -1,0 +1,92 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] cgroup: accept the cpuset_v2_mode mount option
+
+Android mounts the cpuset hierarchy with
+
+  mount("none", "/dev/cpuset", "cgroup", ..., "cpuset,noprefix,cpuset_v2_mode")
+
+(system/core/libprocessgroup/setup/cgroup_map_write.cpp). 3.10 takes any
+option it does not know for a controller name and fails the mount with
+ENOENT, so /dev/cpuset would stay empty even with CONFIG_CPUSETS enabled
+("libprocessgroup: Failed to mount controller cpuset: No such file or
+directory").
+
+Parse the option into a new root flag, CGRP_ROOT_CPUSET_V2_MODE, and show
+it in /proc/mounts. The flag is for the cpuset controller; nothing reads
+it yet, the next patch does.
+
+What userspace asks for with this option is that a cpuset gets its CPUs
+back after they were offline. "cpuset: restore the requested CPUs when
+they come back online" already does that for every cpuset hierarchy,
+whatever its mount options.
+
+Derived from upstream:
+  e1cba4b85daa "cgroup: Add mount flag to enable cpuset to use v2 behavior
+               in v1 cgroup" (v4.14)
+
+Adapted for 3.10:
+- The flag is bit 3 of the root flags (bit 16 upstream; 3.10 uses bits
+  0-2 and has no room reserved).
+- Like the other root flags it takes part in the "new mount options do
+  not match the existing superblock" comparison and cannot be changed by
+  a remount.
+
+Compile-tested as part of the cpuset series with CONFIG_CPUSETS=y: full
+zImage with the GCC 4.9 arm-linux-androideabi prebuilt, and
+kernel/cpuset.o and kernel/cgroup.o at every step of the series; no
+warnings in the files touched. Not run on the device.
+
+[combined set, 2026-11-06] Header only, the diff is the staged one. The
+paragraph above said "five patches". The series was staged as five
+(staging/backport-cpusets 0014-0018) and compiled step by step in that
+form; the combined set has four of them, 0015-0018. The fifth, "cpuset:
+let CAP_SYS_NICE move other users' tasks into a cpuset" (staged 0015),
+is replaced by "cgroup: one credential rule for moving another user's
+task" (0014). The four were compiled again in that form, as one zImage
+build of the whole combined series, not step by step.
+---
+ include/linux/cgroup.h | 6 ++++++
+ kernel/cgroup.c        | 6 ++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/include/linux/cgroup.h b/include/linux/cgroup.h
+index 32a4f95..d860a96 100644
+--- a/include/linux/cgroup.h
++++ b/include/linux/cgroup.h
+@@ -281,6 +281,12 @@ enum {
+ 
+ 	CGRP_ROOT_NOPREFIX	= (1 << 1), /* mounted subsystems have no named prefix */
+ 	CGRP_ROOT_XATTR		= (1 << 2), /* supports extended attributes */
++
++	/*
++	 * "cpuset_v2_mode" mount option: the cpusets of this hierarchy handle
++	 * CPU hotplug the way cgroup v2 does.  Read by kernel/cpuset.c only.
++	 */
++	CGRP_ROOT_CPUSET_V2_MODE = (1 << 3),
+ };
+ 
+ /*
+diff --git a/kernel/cgroup.c b/kernel/cgroup.c
+index 9f0fb7e..5649666 100644
+--- a/kernel/cgroup.c
++++ b/kernel/cgroup.c
+@@ -1098,6 +1098,8 @@ static int cgroup_show_options(struct seq_file *seq, struct dentry *dentry)
+ 		seq_puts(seq, ",noprefix");
+ 	if (root->flags & CGRP_ROOT_XATTR)
+ 		seq_puts(seq, ",xattr");
++	if (root->flags & CGRP_ROOT_CPUSET_V2_MODE)
++		seq_puts(seq, ",cpuset_v2_mode");
+ 	if (strlen(root->release_agent_path))
+ 		seq_printf(seq, ",release_agent=%s", root->release_agent_path);
+ 	if (test_bit(CGRP_CPUSET_CLONE_CHILDREN, &root->top_cgroup.flags))
+@@ -1174,6 +1176,10 @@ static int parse_cgroupfs_options(char *data, struct cgroup_sb_opts *opts)
+ 			opts->flags |= CGRP_ROOT_XATTR;
+ 			continue;
+ 		}
++		if (!strcmp(token, "cpuset_v2_mode")) {
++			opts->flags |= CGRP_ROOT_CPUSET_V2_MODE;
++			continue;
++		}
+ 		if (!strncmp(token, "release_agent=", 14)) {
+ 			/* Specifying two release agents is forbidden */
+ 			if (opts->release_agent)

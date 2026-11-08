@@ -1,0 +1,406 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] modem_v1: arm the CP-to-AP interrupts for wake-up only while CP runs
+
+The SS333 modem driver registers three interrupts on always-on (GPA)
+pins, and mif_request_irq() arms every one of them as a wake-up source
+the moment it is requested:
+
+  ss333_active      PHONE_ACTIVE  gpa2-3  rising edge, left enabled
+  lli_cp2ap_wakeup  CP2AP_WAKEUP  gpa3-1  level, disabled until CP_START
+  lli_cp2ap_status  CP2AP_STATUS  gpa2-5  level, disabled until CP_START
+
+The pins have no pull (exynos5433-modem-ss333.dtsi) and the GPA block
+has no separate sleep configuration, so with CP powered off (CP_ON and
+CP_RST low, which is how the driver leaves them at probe) the three
+inputs float, awake and in suspend alike. On a tablet that never boots
+its modem this has two effects.
+
+1. Every rising edge on PHONE_ACTIVE can take the SoC out of suspend:
+   arming the interrupt clears the pin's bit in EINT_WAKEUP_MASK. The
+   handler returns at once while CP is not ONLINE, so each such wake-up
+   is pure overhead.
+
+2. The two LLI interrupts are disabled with disable_irq_nosync(), which
+   is lazy here because the wake-up EINT chip has no irq_disable
+   callback: the line stays unmasked. The first time a floating line
+   reads high, handle_level_irq() masks it and sets IRQS_PENDING, and
+   nothing clears that flag again before enable_irq().
+   check_wakeup_irqs() in this tree returns -EBUSY for any wake-up
+   interrupt with IRQS_PENDING, whether it is disabled or not ("Wakeup
+   IRQ %d %s pending, suspend aborted"), so from then on no suspend
+   succeeds until the next reboot.
+
+Observed on an SM-T815 (hardware revision 6) running without cbd, 51
+minutes after boot, in /proc/interrupts: ss333_active 13,
+lli_cp2ap_wakeup 1, lli_cp2ap_status 1. A count that stops at 1 is what
+a disabled level interrupt shows after its only possible delivery. No
+suspend had been attempted in that session (USB connected), so neither
+effect has been seen in a suspend log yet.
+
+Arm the interrupts only while CP runs:
+
+- mif_request_irq_nowake() requests an interrupt without arming it.
+  mif_request_irq() keeps its old behaviour.
+- mif_enable_irq_wake() and mif_disable_irq_wake() arm and disarm. They
+  remember the state in struct modem_irq and do nothing when it is
+  already as asked, so the enable_irq_wake()/disable_irq_wake() pairs
+  cannot become unbalanced whatever order the modem control paths run
+  in.
+- An interrupt is armed right after it is enabled and disarmed right
+  before it is disabled. "Armed" therefore implies "enabled", and the
+  state check_wakeup_irqs() trips over - armed, disabled and pending -
+  cannot be reached any more, neither before the first boot of CP nor
+  after CP has been switched off again.
+
+ss333_active, by path:
+
+  ss333_init_modemctl_device  requested, enabled, not armed
+                              (was: enabled and armed)
+  ss333_on                    disarm (nothing to do before the first
+                              boot), disable
+  ss333_boot_off              enable, arm; on the init timeout it
+                              returns before both, leaving the
+                              interrupt disabled and not armed
+  ss333_boot_done             no change
+  ss333_off                   disarm, disable; also reached through
+                              modem_shutdown() and ss333_reset()
+  ss333_force_crash_exit      does not touch the interrupt: it stays
+                              enabled and armed while CP is still
+                              powered, as before
+  ss333_dump_reset            disarm, disable
+  cp_active_handler           does not touch it
+
+lli_cp2ap_wakeup and lli_cp2ap_status, by path:
+
+  init_link_device_pm         requested, disabled, not armed
+                              (was: disabled and armed)
+  start_link_pm               enable, arm, for all three start events;
+                              a second call returns early ("already
+                              ACTIVE")
+  stop_link_pm                disarm, disable; returns early when PM is
+                              not active. Reached from lli_link_off(),
+                              i.e. from ss333_on, ss333_off,
+                              ss333_force_crash_exit and
+                              ss333_dump_reset, and from
+                              pm_cp_fail_cb()
+
+With CP booted by cbd the three interrupts are armed exactly while they
+are enabled, which is when a wake-up from them can be acted upon. The
+windows in which they used to be armed but disabled (CP booting, crash
+dump, CP off) are covered by ss333_wake_lock or have CP powered down.
+The enable and disable calls themselves, and with them the replay of an
+edge that arrives while ss333_active is disabled, are unchanged.
+
+ss333_active is deliberately not disabled before the first boot. It is
+edge triggered, and an edge latched while it is disabled is replayed
+when ss333_boot_off() enables it; cp_active_handler() takes a rising
+edge with CP ONLINE and PHONE_ACTIVE high for a CP crash. Keeping the
+interrupt disabled from probe would let the floating line queue such an
+edge for the first boot. Left enabled, as it always was, a stray edge is
+consumed by the handler, which ignores it while CP is not ONLINE; not
+being armed, it cannot wake the system.
+
+A disabled LLI interrupt can still latch IRQS_PENDING on a floating
+line. That is harmless now: check_wakeup_irqs() only looks at armed
+interrupts, and start_link_pm() enables the interrupt, which drops the
+flag for a level interrupt, before it arms it.
+
+Other users: modem_ctrl_ss300.c and the non-FSM half of
+link_device_lli.c still call mif_request_irq() and are not changed
+(neither is built with lineage_gts210ltexx_defconfig). link_device_pm.c
+is shared by every modem that uses
+CONFIG_LINK_POWER_MANAGEMENT_WITH_FSM; its two interrupts follow the new
+rule on those boards too.
+---
+ drivers/misc/modem_v1/link_device_pm.c   |  17 ++++-
+ drivers/misc/modem_v1/modem_ctrl_ss333.c |  11 ++-
+ drivers/misc/modem_v1/modem_utils.c      | 105 +++++++++++++++++++++++++++++
+ drivers/misc/modem_v1/modem_utils.h      |   4 ++
+ include/linux/platform_data/modem_v1.h   |   1 +
+ 5 files changed, 135 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/misc/modem_v1/link_device_pm.c b/drivers/misc/modem_v1/link_device_pm.c
+index ac63869..7327637 100644
+--- a/drivers/misc/modem_v1/link_device_pm.c
++++ b/drivers/misc/modem_v1/link_device_pm.c
+@@ -822,14 +822,17 @@ static void start_link_pm(struct modem_link_pm *pm, enum pm_event event)
+ 
+ 	/*
+ 	Enable every CP-to-AP IRQ and set it as a wake-up source
++	(enable first: that drops what a disabled level IRQ has left pending)
+ 	*/
+ 	cp2ap_wakeup = gpio_get_value(pm->gpio_cp2ap_wakeup);
+ 	change_irq_level(pm->cp2ap_wakeup_irq.num, cp2ap_wakeup);
+ 	mif_enable_irq(&pm->cp2ap_wakeup_irq);
++	mif_enable_irq_wake(&pm->cp2ap_wakeup_irq);
+ 
+ 	cp2ap_status = gpio_get_value(pm->gpio_cp2ap_status);
+ 	change_irq_level(pm->cp2ap_status_irq.num, cp2ap_status);
+ 	mif_enable_irq(&pm->cp2ap_status_irq);
++	mif_enable_irq_wake(&pm->cp2ap_status_irq);
+ 
+ 	set_pm_fsm(pm, PM_STATE_UNMOUNTED, state, event);
+ 
+@@ -856,10 +859,16 @@ static void stop_link_pm(struct modem_link_pm *pm)
+ 
+ 	pm->active = false;
+ 
++	/*
++	A disabled IRQ must not stay a wake-up source: the lines float while CP
++	is off, and a wake-up IRQ left pending aborts every suspend
++	*/
++	mif_disable_irq_wake(&pm->cp2ap_wakeup_irq);
+ 	mif_disable_irq(&pm->cp2ap_wakeup_irq);
+ 	mif_err("%s: PM %s_irq#%d handler disabled\n", pm->link_name,
+ 		pm->cp2ap_wakeup_irq.name, pm->cp2ap_wakeup_irq.num);
+ 
++	mif_disable_irq_wake(&pm->cp2ap_status_irq);
+ 	mif_disable_irq(&pm->cp2ap_status_irq);
+ 	mif_err("%s: PM %s_irq#%d handler disabled\n", pm->link_name,
+ 		pm->cp2ap_status_irq.name, pm->cp2ap_status_irq.num);
+@@ -933,11 +942,14 @@ int init_link_device_pm(struct link_device *ld,
+ 
+ 	/*
+ 	Register cp2ap_wakeup IRQ handler
++	(not as a wake-up source yet: start_link_pm() arms both CP-to-AP IRQs
++	and stop_link_pm() disarms them)
+ 	*/
+ 	cp2ap_wakeup = gpio_get_value(pm->gpio_cp2ap_wakeup);
+ 	change_irq_level(pm->cp2ap_wakeup_irq.num, cp2ap_wakeup);
+ 
+-	err = mif_request_irq(&pm->cp2ap_wakeup_irq, cp2ap_wakeup_handler, pm);
++	err = mif_request_irq_nowake(&pm->cp2ap_wakeup_irq,
++				     cp2ap_wakeup_handler, pm);
+ 	if (err) {
+ 		mif_err("%s: ERR! request_irq(%s#%d) fail (%d)\n",
+ 			pm->link_name, pm->cp2ap_wakeup_irq.name,
+@@ -955,7 +967,8 @@ int init_link_device_pm(struct link_device *ld,
+ 	cp2ap_status = gpio_get_value(pm->gpio_cp2ap_status);
+ 	change_irq_level(pm->cp2ap_status_irq.num, cp2ap_status);
+ 
+-	err = mif_request_irq(&pm->cp2ap_status_irq, cp2ap_status_handler, pm);
++	err = mif_request_irq_nowake(&pm->cp2ap_status_irq,
++				     cp2ap_status_handler, pm);
+ 	if (err) {
+ 		mif_err("%s: ERR! request_irq(%s#%d) fail (%d)\n",
+ 			pm->link_name, pm->cp2ap_status_irq.name,
+diff --git a/drivers/misc/modem_v1/modem_ctrl_ss333.c b/drivers/misc/modem_v1/modem_ctrl_ss333.c
+index 2351b85..670fd9c 100644
+--- a/drivers/misc/modem_v1/modem_ctrl_ss333.c
++++ b/drivers/misc/modem_v1/modem_ctrl_ss333.c
+@@ -162,6 +162,7 @@ static int ss333_on(struct modem_ctl *mc)
+ 	struct link_device *ld = get_current_link(iod);
+ 	unsigned long flags;
+ 
++	mif_disable_irq_wake(&mc->irq_cp_active);
+ 	mif_disable_irq(&mc->irq_cp_active);
+ 
+ 	mif_info("%s: %s: +++\n", mc->name, FUNC);
+@@ -215,6 +216,7 @@ static int ss333_off(struct modem_ctl *mc)
+ 	unsigned long flags;
+ 	int i;
+ 
++	mif_disable_irq_wake(&mc->irq_cp_active);
+ 	mif_disable_irq(&mc->irq_cp_active);
+ 
+ 	mif_info("%s: %s: +++\n", mc->name, FUNC);
+@@ -342,6 +344,7 @@ static int ss333_dump_reset(struct modem_ctl *mc)
+ 	unsigned int gpio_cp_reset = mc->gpio_cp_reset;
+ 	unsigned long flags;
+ 
++	mif_disable_irq_wake(&mc->irq_cp_active);
+ 	mif_disable_irq(&mc->irq_cp_active);
+ 
+ 	mif_info("%s: %s: +++\n", mc->name, FUNC);
+@@ -416,6 +419,7 @@ static int ss333_boot_off(struct modem_ctl *mc)
+ 	}
+ 
+ 	mif_enable_irq(&mc->irq_cp_active);
++	mif_enable_irq_wake(&mc->irq_cp_active);
+ 
+ 	spin_lock_irqsave(&mc->lock, flags);
+ 	mc->bootd->modem_state_changed(mc->bootd, STATE_ONLINE);
+@@ -572,7 +576,12 @@ int ss333_init_modemctl_device(struct modem_ctl *mc, struct modem_data *pdata)
+ 	snprintf(name, MAX_NAME_LEN, "%s_active", mc->name);
+ 	mif_init_irq(&mc->irq_cp_active, irq, name, flag);
+ 
+-	ret = mif_request_irq(&mc->irq_cp_active, cp_active_handler, mc);
++	/*
++	PHONE_ACTIVE is not driven while CP is off and the pin has no pull, so
++	the IRQ must not be a wake-up source before CP has been booted. It is
++	armed in ss333_boot_off() and disarmed again wherever it is disabled.
++	*/
++	ret = mif_request_irq_nowake(&mc->irq_cp_active, cp_active_handler, mc);
+ 	if (ret) {
+ 		mif_err("%s: ERR! request_irq(%s#%d) fail (%d)\n",
+ 			mc->name, mc->irq_cp_active.name,
+diff --git a/drivers/misc/modem_v1/modem_utils.c b/drivers/misc/modem_v1/modem_utils.c
+index 5d6a8b6..679fbeb 100644
+--- a/drivers/misc/modem_v1/modem_utils.c
++++ b/drivers/misc/modem_v1/modem_utils.c
+@@ -1044,10 +1044,19 @@ void mif_init_irq(struct modem_irq *irq, unsigned int num, const char *name,
+ 	irq->num = num;
+ 	strncpy(irq->name, name, (MAX_NAME_LEN - 1));
+ 	irq->flags = flags;
++	irq->wake = false;
+ 	mif_info("%s: name:%s num:%d flags:0x%08lX\n",
+ 		FUNC, name, num, flags);
+ }
+ 
++/**
++@brief		request an IRQ and arm it as a wake-up source at once
++
++@remark		The IRQ stays armed for as long as nobody calls
++		mif_disable_irq_wake(), also while it is disabled. Use
++		mif_request_irq_nowake() for an IRQ whose line is not driven
++		while the modem is off.
++*/
+ int mif_request_irq(struct modem_irq *irq, irq_handler_t isr, void *data)
+ {
+ 	int ret;
+@@ -1065,6 +1074,8 @@ int mif_request_irq(struct modem_irq *irq, irq_handler_t isr, void *data)
+ 	if (ret) {
+ 		mif_err("%s: %s: ERR! enable_irq_wake fail (%d)\n",
+ 			FUNC, irq->name, ret);
++	} else {
++		irq->wake = true;
+ 	}
+ 
+ 	mif_info("%s: %s(#%d) handler registered (flags:0x%08lX)\n",
+@@ -1073,6 +1084,33 @@ int mif_request_irq(struct modem_irq *irq, irq_handler_t isr, void *data)
+ 	return 0;
+ }
+ 
++/**
++@brief		request an IRQ without arming it as a wake-up source
++
++The IRQ is left enabled, exactly as mif_request_irq() leaves it, but it can
++neither wake the system up nor make check_wakeup_irqs() abort a suspend until
++mif_enable_irq_wake() is called.
++*/
++int mif_request_irq_nowake(struct modem_irq *irq, irq_handler_t isr,
++			   void *data)
++{
++	int ret;
++
++	ret = request_irq(irq->num, isr, irq->flags, irq->name, data);
++	if (ret) {
++		mif_err("%s: %s: ERR! request_irq fail (%d)\n",
++			FUNC, irq->name, ret);
++		return ret;
++	}
++
++	irq->active = true;
++
++	mif_info("%s: %s(#%d) handler registered (flags:0x%08lX)\n",
++		FUNC, irq->name, irq->num, irq->flags);
++
++	return 0;
++}
++
+ void mif_enable_irq(struct modem_irq *irq)
+ {
+ 	unsigned long flags;
+@@ -1119,6 +1157,73 @@ exit:
+ 	spin_unlock_irqrestore(&irq->lock, flags);
+ }
+ 
++/**
++@brief		arm an IRQ as a wake-up source
++
++Does nothing if the IRQ is armed already, so that the callers need not keep
++the enable_irq_wake()/disable_irq_wake() calls balanced themselves.
++
++@remark		Arm an IRQ only while it is enabled. This kernel aborts every
++		suspend for as long as a wake-up IRQ has IRQS_PENDING set, and
++		a disabled IRQ keeps that flag until it is enabled again.
++*/
++void mif_enable_irq_wake(struct modem_irq *irq)
++{
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&irq->lock, flags);
++
++	if (irq->wake)
++		goto exit;
++
++	ret = enable_irq_wake(irq->num);
++	if (ret) {
++		mif_err("%s: %s(#%d) ERR! enable_irq_wake fail (%d) <%pf>\n",
++			FUNC, irq->name, irq->num, ret, CALLER);
++		goto exit;
++	}
++
++	irq->wake = true;
++
++	mif_info("%s: %s(#%d) is armed for wake-up <%pf>\n",
++		FUNC, irq->name, irq->num, CALLER);
++
++exit:
++	spin_unlock_irqrestore(&irq->lock, flags);
++}
++
++/**
++@brief		stop an IRQ from being a wake-up source
++
++Does nothing if the IRQ is not armed.
++*/
++void mif_disable_irq_wake(struct modem_irq *irq)
++{
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&irq->lock, flags);
++
++	if (!irq->wake)
++		goto exit;
++
++	ret = disable_irq_wake(irq->num);
++	if (ret) {
++		mif_err("%s: %s(#%d) ERR! disable_irq_wake fail (%d) <%pf>\n",
++			FUNC, irq->name, irq->num, ret, CALLER);
++		goto exit;
++	}
++
++	irq->wake = false;
++
++	mif_info("%s: %s(#%d) is disarmed for wake-up <%pf>\n",
++		FUNC, irq->name, irq->num, CALLER);
++
++exit:
++	spin_unlock_irqrestore(&irq->lock, flags);
++}
++
+ struct file *mif_open_file(const char *path)
+ {
+ 	struct file *fp;
+diff --git a/drivers/misc/modem_v1/modem_utils.h b/drivers/misc/modem_v1/modem_utils.h
+index da7c661..eb2d88f 100644
+--- a/drivers/misc/modem_v1/modem_utils.h
++++ b/drivers/misc/modem_v1/modem_utils.h
+@@ -520,8 +520,12 @@ bool is_syn_packet(const u8 *ip_pkt);
+ void mif_init_irq(struct modem_irq *irq, unsigned int num, const char *name,
+ 		  unsigned long flags);
+ int mif_request_irq(struct modem_irq *irq, irq_handler_t isr, void *data);
++int mif_request_irq_nowake(struct modem_irq *irq, irq_handler_t isr,
++			   void *data);
+ void mif_enable_irq(struct modem_irq *irq);
+ void mif_disable_irq(struct modem_irq *irq);
++void mif_enable_irq_wake(struct modem_irq *irq);
++void mif_disable_irq_wake(struct modem_irq *irq);
+ 
+ struct file *mif_open_file(const char *path);
+ void mif_save_file(struct file *fp, const char *buff, size_t size);
+diff --git a/include/linux/platform_data/modem_v1.h b/include/linux/platform_data/modem_v1.h
+index 60136fb..87e2e32 100644
+--- a/include/linux/platform_data/modem_v1.h
++++ b/include/linux/platform_data/modem_v1.h
+@@ -471,6 +471,7 @@ struct modem_irq {
+ 	char name[MAX_NAME_LEN];
+ 	unsigned long flags;
+ 	bool active;
++	bool wake;	/* armed as a wake-up source (enable_irq_wake) */
+ };
+ 
+ #define MODEM_BOOT_DEV_SPI "spi_boot_link"

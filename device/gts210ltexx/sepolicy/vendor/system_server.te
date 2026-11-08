@@ -1,0 +1,8 @@
+# fixes-3 item 4. ConnectivityService adds a "clsact" qdisc to every network interface
+# (RTM_NEWQDISC). Linux 3.10 has no clsact qdisc (it came with 4.5), so the kernel tries to load
+# a module "sch_clsact" on behalf of system_server, which is denied and logged once per interface
+# ("avc: denied { module_request } ... kmod="sch_clsact""). No such module exists for this
+# kernel, so there is nothing to allow: the request fails either way and ConnectivityService
+# logs "Fail to send RTM_NEWQDISC to add clsact" as before. Only the audit message is dropped.
+# Note this hides every module request made by system_server, not just this one.
+dontaudit system_server kernel:system module_request;

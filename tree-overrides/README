@@ -1,0 +1,18 @@
+Files under this directory are copied over the same path in lineage/ by
+scripts/prepare-tree.sh at the start of every build (rsync, no delete).
+
+vendor/partner_gms/GmsCore/GmsCore.apk
+    microG GmsCore 0.3.16.252432 (versionCode 252432032), from
+    https://github.com/microg/GmsCore/releases/download/v0.3.16.252432/com.google.android.gms-252432032.apk
+    sha256 169a53df557e6577322e7cc8aa3389cb82b3d6408dd162433cc94f1d084a73d4, signer verified as microG
+    (certificate SHA-256 9bd06727e62796c0130eb6dab39b73157451582cbd138e86c468acc395d14165).
+    The APK is not kept in git: scripts/fetch-prebuilts.sh downloads it to this path and checks
+    the sha256 and, where apksigner is available, the signer.
+    Temporary downgrade from the pinned 0.3.17.252432 (2026-11-06, owner's decision): in 0.3.17 the
+    consent activity for Aurora Store's login through microG is not reachable
+    (https://github.com/microg/GmsCore/issues/3853). 0.3.16 lacks the security fixes of
+    2026-09-29 (GHSA-rp4p-8x89-jhv5 and others).
+    To return to the pinned version: remove the GmsCore entry from scripts/fetch-prebuilts.sh and
+    the APK check from scripts/prepare-tree.sh, then delete this file and
+    lineage/vendor/partner_gms/GmsCore/GmsCore.apk; vendorsetup.sh then downloads the version
+    named in GmsCore/.version_code again.

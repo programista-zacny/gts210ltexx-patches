@@ -1,0 +1,793 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] locks: add open file description locks (F_OFD_GETLK,
+ F_OFD_SETLK, F_OFD_SETLKW)
+
+Open file description (OFD) locks are byte range locks that conflict with
+classic POSIX record locks but are owned by the open file description
+(the struct file) instead of the process: they are not dropped when the
+process closes some other fd of the same file, they are shared by dup()ed
+fds and by every process that holds a reference to the same open file
+(fork(), SCM_RIGHTS, binder), and they go away when the last such
+reference is put. Linux has had them since 3.15; this kernel answers
+EINVAL.
+
+Why: Android's MediaProvider FUSE daemon (packages/providers/
+MediaProvider/jni/FuseDaemon.cpp, set_file_lock()/is_file_locked() called
+from ShouldOpenWithFuse() and pf_open) takes an F_OFD_SETLK read lock on
+the lower filesystem fd before handing it to an app, and later asks with
+F_OFD_GETLK whether such an fd is still open anywhere. On this kernel
+both calls fail ("W FuseDaemon: Failed to set lock: read: Invalid
+argument", "Failed to check lock: Invalid argument"), so MediaProvider
+never returns lower filesystem fds and opens every FUSE handle with
+direct_io. Two consequences seen on build 9: the camera app's video
+recording fails with EFAULT (fuse direct_io does get_user_pages() on the
+Codec2 ION/dmabuf buffer the muxer writes from, a VM_IO|VM_PFNMAP
+mapping) and stops after a fraction of a second, and all media file I/O
+goes through FUSE without the page cache.
+
+Derived from upstream, the 3.15 series by Jeff Layton
+  c918d42a27a9 "locks: make /proc/locks show IS_FILE_PVT locks as type
+               'FLPVT'" (the FL_OFDLCK flag and the IS_OFDLCK() macro)
+  3fd80cddc6af "locks: report l_pid as -1 for FL_FILE_PVT locks"
+  c1e62b8fc355 "locks: pass the cmd value to fcntl_getlk/getlk64"
+  57b65325fe34 "locks: skip deadlock detection on FL_FILE_PVT locks"
+  5d50ffd7c31d "locks: add new fcntl cmd values for handling file
+               private locks" (the core: uapi values 36/37/38, the
+               fcntl()/fcntl64() dispatch, the FL_OFDLCK owner override
+               in fcntl_setlk/setlk64/getlk/getlk64, the release of the
+               locks on the last close, the SELinux lock permission
+               hook, the ARM OABI shim)
+  90478939dce0 "locks: require that flock->l_pid be set to 0 for
+               file-private locks"
+  d7a06983a01a "locks: fix locks_mandatory_locked to respect
+               file-private locks"
+  29723adee118 "locks: make locks_mandatory_area check for file-private
+               locks"
+  0d3f7a2dd2f5 "locks: rename file-private locks to 'open file
+               description locks'"
+  cff2fce58b2b "locks: rename FL_FILE_PVT and IS_FILE_PVT to use
+               '*_OFDLCK' instead"
+with the final names (F_OFD_*, FL_OFDLCK, "OFDLCK" in /proc/locks) used
+from the start, two 3.14 preparations folded in
+  78ed8a13382b "locks: rename locks_remove_flock to locks_remove_file"
+  8c3cac5e6a85 "locks: eliminate BUG() call when there's an unexpected
+               lock on file close"
+and one later fix
+  0752ba807b04 "locks: don't check for race with close when setting OFD
+               lock" (4.5: the close/fcntl race recovery of fcntl_setlk
+               must not undo an OFD lock, which the description may
+               still hold through another fd; 7f3697e24dc3, which that
+               code builds on, is already in 3.10.108)
+
+What the result does (all read in the final code):
+- F_OFD_SETLK/F_OFD_SETLKW/F_OFD_GETLK are 37/38/36
+  (include/uapi/asm-generic/fcntl.h). On this 32-bit kernel they are
+  accepted by sys_fcntl64() and take a struct flock64, as upstream; the
+  legacy sys_fcntl() keeps answering EINVAL for them on 32-bit (upstream
+  did not add the new interface to the legacy entry point, and bionic
+  always calls fcntl64 on LP32).
+- The owner of an OFD lock is the struct file: fcntl_setlk()/setlk64()
+  and fcntl_getlk()/getlk64() set FL_OFDLCK and fl_owner = filp, then
+  continue as F_SETLK/F_SETLKW/F_GETLK(64). posix_same_owner() compares
+  fl_owner, so an OFD lock and a classic lock of the same process have
+  different owners and conflict, an OFD lock taken through any fd of the
+  same description (dup, fork, passed fd) merges with it, and F_OFD_GETLK
+  does not report the caller's own description's locks.
+- l_pid must be 0 on input (EINVAL otherwise); a conflicting OFD lock is
+  reported with l_pid = -1 by both F_GETLK and F_OFD_GETLK.
+- Release: locks_remove_file() (the renamed locks_remove_flock(), called
+  from __fput() on the last reference to the struct file) first calls
+  locks_remove_posix(filp, (fl_owner_t)filp). filp_close() still calls
+  locks_remove_posix(filp, files) on every close, which only matches
+  classic locks, so closing some other fd of the file leaves OFD locks
+  alone.
+- F_OFD_SETLKW sleeps in do_lock_file_wait() with
+  wait_event_interruptible() like F_SETLKW and returns EINTR on a
+  signal.
+- Deadlock detection is skipped for OFD requests
+  (posix_locks_deadlock() returns 0) and waiters blocked on an OFD lock
+  are not put on blocked_list, as upstream.
+- /proc/locks prints "OFDLCK" in the type column instead of "POSIX ",
+  same width and field count; classic lines are unchanged. The pid
+  column shows the pid that set the lock (3.15 behaviour; kernels since
+  4.14 print -1 there).
+- Mandatory locking (unused on this system: needs -o mand) also treats
+  OFD locks held through the same file as the caller's own.
+- CIFS, FUSE and other ->lock() filesystems receive the request through
+  vfs_lock_file() with the converted cmd, as upstream. For FUSE the
+  MediaProvider daemon does not implement getlk/setlk, so the kernel
+  keeps the locks locally (fc->no_lock) and everything above applies to
+  files on /sdcard too.
+
+Adapted for 3.10:
+- fs/locks.c of 3.10 still uses the global file_lock_lock, the single
+  blocked_list and fl_link for the blocked list: the "do not add waiters
+  of OFD locks to the global blocked list" change is applied to
+  locks_insert_block() (upstream: __locks_insert_block() and the
+  blocked_hash of 3.12+).
+- file_inode() is defined later in include/linux/fs.h than
+  locks_verify_locked(); it is moved up before the file locking
+  declarations (upstream moved it next to ihold()/iput(), which in 3.10
+  come after the locking block). The callers of locks_verify_locked()
+  are the same three as upstream (fs/namei.c, mm/mmap.c, mm/nommu.c).
+- The f_mode vs lock type check stays where 3.10 has it, in
+  fcntl_setlk()/setlk64() after the cmd switch (upstream moved it around
+  in bce7560d4946/cf01f4eef9fe with the same effect).
+- No fs/compat.c hunk: this kernel has no CONFIG_COMPAT.
+- arch/arm/kernel/sys_oabi-compat.c already referenced F_OFD_GETLK in
+  do_locks() (from a stable backport) without it being defined anywhere;
+  CONFIG_OABI_COMPAT is off here so it never compiled. The OFD cases are
+  added to sys_oabi_fcntl64() as upstream; still not compiled.
+- Everything else applies as upstream; fl_owner_t is still
+  "struct files_struct *" in 3.10, the (fl_owner_t)filp casts are the
+  3.15 ones.
+
+Compile-tested (ARM, GCC 4.9, lineage_gts210ltexx_defconfig): zImage
+builds, no warnings in the touched files. A static ARM test program for
+the semantics above is in staging/ofd-locks/tests (its logic verified
+on a 7.3 host kernel). Not run on the device.
+---
+ arch/arm/kernel/sys_oabi-compat.c |    3 +
+ fs/fcntl.c                        |   37 +++++---
+ fs/file_table.c                   |    2 
+ fs/locks.c                        |  180 +++++++++++++++++++++++++++++++------
+ fs/namei.c                        |    2 
+ include/linux/fs.h                |   37 ++++----
+ include/uapi/asm-generic/fcntl.h  |   16 +++
+ mm/mmap.c                         |    2 
+ mm/nommu.c                        |    2 
+ security/selinux/hooks.c          |    3 +
+ 10 files changed, 221 insertions(+), 63 deletions(-)
+
+diff --git a/arch/arm/kernel/sys_oabi-compat.c b/arch/arm/kernel/sys_oabi-compat.c
+index 87c010557b1d..8a1c2c8a1a64 100644
+--- a/arch/arm/kernel/sys_oabi-compat.c
++++ b/arch/arm/kernel/sys_oabi-compat.c
+@@ -232,6 +232,9 @@ asmlinkage long sys_oabi_fcntl64(unsigned int fd, unsigned int cmd,
+ 				 unsigned long arg)
+ {
+ 	switch (cmd) {
++	case F_OFD_GETLK:
++	case F_OFD_SETLK:
++	case F_OFD_SETLKW:
+ 	case F_GETLK64:
+ 	case F_SETLK64:
+ 	case F_SETLKW64:
+diff --git a/fs/fcntl.c b/fs/fcntl.c
+index 0ec0ab37e8c3..b788814086ef 100644
+--- a/fs/fcntl.c
++++ b/fs/fcntl.c
+@@ -274,9 +274,19 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
+ 	case F_SETFL:
+ 		err = setfl(fd, filp, arg);
+ 		break;
++#if BITS_PER_LONG != 32
++	/* 32-bit arches must use fcntl64() */
++	case F_OFD_GETLK:
++#endif
+ 	case F_GETLK:
+-		err = fcntl_getlk(filp, (struct flock __user *) arg);
++		err = fcntl_getlk(filp, cmd, (struct flock __user *) arg);
+ 		break;
++#if BITS_PER_LONG != 32
++	/* 32-bit arches must use fcntl64() */
++	case F_OFD_SETLK:
++	case F_OFD_SETLKW:
++#endif
++		/* Fallthrough */
+ 	case F_SETLK:
+ 	case F_SETLKW:
+ 		err = fcntl_setlk(fd, filp, cmd, (struct flock __user *) arg);
+@@ -394,17 +404,20 @@ SYSCALL_DEFINE3(fcntl64, unsigned int, fd, unsigned int, cmd,
+ 		goto out1;
+ 	
+ 	switch (cmd) {
+-		case F_GETLK64:
+-			err = fcntl_getlk64(f.file, (struct flock64 __user *) arg);
+-			break;
+-		case F_SETLK64:
+-		case F_SETLKW64:
+-			err = fcntl_setlk64(fd, f.file, cmd,
+-					(struct flock64 __user *) arg);
+-			break;
+-		default:
+-			err = do_fcntl(fd, cmd, arg, f.file);
+-			break;
++	case F_GETLK64:
++	case F_OFD_GETLK:
++		err = fcntl_getlk64(f.file, cmd, (struct flock64 __user *) arg);
++		break;
++	case F_SETLK64:
++	case F_SETLKW64:
++	case F_OFD_SETLK:
++	case F_OFD_SETLKW:
++		err = fcntl_setlk64(fd, f.file, cmd,
++				(struct flock64 __user *) arg);
++		break;
++	default:
++		err = do_fcntl(fd, cmd, arg, f.file);
++		break;
+ 	}
+ out1:
+ 	fdput(f);
+diff --git a/fs/file_table.c b/fs/file_table.c
+index 28f02a7cbba1..ff3177707493 100644
+--- a/fs/file_table.c
++++ b/fs/file_table.c
+@@ -234,7 +234,7 @@ static void __fput(struct file *file)
+ 	 * in the file cleanup chain.
+ 	 */
+ 	eventpoll_release(file);
+-	locks_remove_flock(file);
++	locks_remove_file(file);
+ 
+ 	if (unlikely(file->f_flags & FASYNC)) {
+ 		if (file->f_op && file->f_op->fasync)
+diff --git a/fs/locks.c b/fs/locks.c
+index f7b1de7e6735..f578c97ec339 100644
+--- a/fs/locks.c
++++ b/fs/locks.c
+@@ -132,6 +132,7 @@
+ #define IS_POSIX(fl)	(fl->fl_flags & FL_POSIX)
+ #define IS_FLOCK(fl)	(fl->fl_flags & FL_FLOCK)
+ #define IS_LEASE(fl)	(fl->fl_flags & FL_LEASE)
++#define IS_OFDLCK(fl)	(fl->fl_flags & FL_OFDLCK)
+ 
+ static bool lease_breaking(struct file_lock *fl)
+ {
+@@ -515,7 +516,7 @@ static void locks_insert_block(struct file_lock *blocker,
+ 	BUG_ON(!list_empty(&waiter->fl_block));
+ 	list_add_tail(&waiter->fl_block, &blocker->fl_block);
+ 	waiter->fl_next = blocker;
+-	if (IS_POSIX(blocker))
++	if (IS_POSIX(blocker) && !IS_OFDLCK(blocker))
+ 		list_add(&waiter->fl_link, &blocked_list);
+ }
+ 
+@@ -665,8 +666,16 @@ EXPORT_SYMBOL(posix_test_lock);
+  * Note: the above assumption may not be true when handling lock
+  * requests from a broken NFS client. It may also fail in the presence
+  * of tasks (such as posix threads) sharing the same open file table.
+- *
+  * To handle those cases, we just bail out after a few iterations.
++ *
++ * For FL_OFDLCK locks, the owner is the filp, not the files_struct.
++ * Because the owner is not even nominally tied to a thread of
++ * execution, the deadlock detection below can't reasonably work well. Just
++ * skip it for those.
++ *
++ * In principle, we could do a more limited deadlock detection on FL_OFDLCK
++ * locks that just checks for the case where two tasks are attempting to
++ * upgrade from read to write locks on the same inode.
+  */
+ 
+ #define MAX_DEADLK_ITERATIONS 10
+@@ -688,6 +697,13 @@ static int posix_locks_deadlock(struct file_lock *caller_fl,
+ {
+ 	int i = 0;
+ 
++	/*
++	 * This deadlock detector can't reasonably detect deadlocks with
++	 * FL_OFDLCK locks, since they aren't owned by a process, per-se.
++	 */
++	if (IS_OFDLCK(caller_fl))
++		return 0;
++
+ 	while ((block_fl = what_owner_is_waiting_for(block_fl))) {
+ 		if (i++ > MAX_DEADLK_ITERATIONS)
+ 			return 0;
+@@ -1036,13 +1052,14 @@ EXPORT_SYMBOL(posix_lock_file_wait);
+ 
+ /**
+  * locks_mandatory_locked - Check for an active lock
+- * @inode: the file to check
++ * @file: the file to check
+  *
+  * Searches the inode's list of locks to find any POSIX locks which conflict.
+  * This function is called from locks_verify_locked() only.
+  */
+-int locks_mandatory_locked(struct inode *inode)
++int locks_mandatory_locked(struct file *file)
+ {
++	struct inode *inode = file_inode(file);
+ 	fl_owner_t owner = current->files;
+ 	struct file_lock *fl;
+ 
+@@ -1053,7 +1070,7 @@ int locks_mandatory_locked(struct inode *inode)
+ 	for (fl = inode->i_flock; fl != NULL; fl = fl->fl_next) {
+ 		if (!IS_POSIX(fl))
+ 			continue;
+-		if (fl->fl_owner != owner)
++		if (fl->fl_owner != owner && fl->fl_owner != (fl_owner_t)file)
+ 			break;
+ 	}
+ 	unlock_flocks();
+@@ -1079,19 +1096,30 @@ int locks_mandatory_area(int read_write, struct inode *inode,
+ {
+ 	struct file_lock fl;
+ 	int error;
++	bool sleep = false;
+ 
+ 	locks_init_lock(&fl);
+-	fl.fl_owner = current->files;
+ 	fl.fl_pid = current->tgid;
+ 	fl.fl_file = filp;
+ 	fl.fl_flags = FL_POSIX | FL_ACCESS;
+ 	if (filp && !(filp->f_flags & O_NONBLOCK))
+-		fl.fl_flags |= FL_SLEEP;
++		sleep = true;
+ 	fl.fl_type = (read_write == FLOCK_VERIFY_WRITE) ? F_WRLCK : F_RDLCK;
+ 	fl.fl_start = offset;
+ 	fl.fl_end = offset + count - 1;
+ 
+ 	for (;;) {
++		if (filp) {
++			fl.fl_owner = (fl_owner_t)filp;
++			fl.fl_flags &= ~FL_SLEEP;
++			error = __posix_lock_file(inode, &fl, NULL);
++			if (!error)
++				break;
++		}
++
++		if (sleep)
++			fl.fl_flags |= FL_SLEEP;
++		fl.fl_owner = current->files;
+ 		error = __posix_lock_file(inode, &fl, NULL);
+ 		if (error != FILE_LOCK_DEFERRED)
+ 			break;
+@@ -1686,7 +1714,7 @@ EXPORT_SYMBOL_GPL(vfs_test_lock);
+ 
+ static int posix_lock_to_flock(struct flock *flock, struct file_lock *fl)
+ {
+-	flock->l_pid = fl->fl_pid;
++	flock->l_pid = IS_OFDLCK(fl) ? -1 : fl->fl_pid;
+ #if BITS_PER_LONG == 32
+ 	/*
+ 	 * Make sure we can represent the posix lock via
+@@ -1708,7 +1736,7 @@ static int posix_lock_to_flock(struct flock *flock, struct file_lock *fl)
+ #if BITS_PER_LONG == 32
+ static void posix_lock_to_flock64(struct flock64 *flock, struct file_lock *fl)
+ {
+-	flock->l_pid = fl->fl_pid;
++	flock->l_pid = IS_OFDLCK(fl) ? -1 : fl->fl_pid;
+ 	flock->l_start = fl->fl_start;
+ 	flock->l_len = fl->fl_end == OFFSET_MAX ? 0 :
+ 		fl->fl_end - fl->fl_start + 1;
+@@ -1720,7 +1748,7 @@ static void posix_lock_to_flock64(struct flock64 *flock, struct file_lock *fl)
+ /* Report the first existing lock that would conflict with l.
+  * This implements the F_GETLK command of fcntl().
+  */
+-int fcntl_getlk(struct file *filp, struct flock __user *l)
++int fcntl_getlk(struct file *filp, unsigned int cmd, struct flock __user *l)
+ {
+ 	struct file_lock file_lock;
+ 	struct flock flock;
+@@ -1737,6 +1765,16 @@ int fcntl_getlk(struct file *filp, struct flock __user *l)
+ 	if (error)
+ 		goto out;
+ 
++	if (cmd == F_OFD_GETLK) {
++		error = -EINVAL;
++		if (flock.l_pid != 0)
++			goto out;
++
++		cmd = F_GETLK;
++		file_lock.fl_flags |= FL_OFDLCK;
++		file_lock.fl_owner = (fl_owner_t)filp;
++	}
++
+ 	error = vfs_test_lock(filp, &file_lock);
+ 	if (error)
+ 		goto out;
+@@ -1855,10 +1893,34 @@ int fcntl_setlk(unsigned int fd, struct file *filp, unsigned int cmd,
+ 	error = flock_to_posix_lock(filp, file_lock, &flock);
+ 	if (error)
+ 		goto out;
+-	if (cmd == F_SETLKW) {
++
++	/*
++	 * If the cmd is requesting file-private locks, then set the
++	 * FL_OFDLCK flag and override the owner.
++	 */
++	switch (cmd) {
++	case F_OFD_SETLK:
++		error = -EINVAL;
++		if (flock.l_pid != 0)
++			goto out;
++
++		cmd = F_SETLK;
++		file_lock->fl_flags |= FL_OFDLCK;
++		file_lock->fl_owner = (fl_owner_t)filp;
++		break;
++	case F_OFD_SETLKW:
++		error = -EINVAL;
++		if (flock.l_pid != 0)
++			goto out;
++
++		cmd = F_SETLKW;
++		file_lock->fl_flags |= FL_OFDLCK;
++		file_lock->fl_owner = (fl_owner_t)filp;
++		/* Fallthrough */
++	case F_SETLKW:
+ 		file_lock->fl_flags |= FL_SLEEP;
+ 	}
+-	
++
+ 	error = -EBADF;
+ 	switch (flock.l_type) {
+ 	case F_RDLCK:
+@@ -1879,10 +1941,12 @@ int fcntl_setlk(unsigned int fd, struct file *filp, unsigned int cmd,
+ 	error = do_lock_file_wait(filp, cmd, file_lock);
+ 
+ 	/*
+-	 * Attempt to detect a close/fcntl race and recover by
+-	 * releasing the lock that was just acquired.
++	 * Attempt to detect a close/fcntl race and recover by releasing the
++	 * lock that was just acquired. There is no need to do that when we're
++	 * unlocking though, or for OFD locks.
+ 	 */
+-	if (!error && file_lock->fl_type != F_UNLCK) {
++	if (!error && file_lock->fl_type != F_UNLCK &&
++	    !(file_lock->fl_flags & FL_OFDLCK)) {
+ 		/*
+ 		 * We need that spin_lock here - it prevents reordering between
+ 		 * update of inode->i_flock and check for it done in
+@@ -1907,7 +1971,7 @@ out:
+ /* Report the first existing lock that would conflict with l.
+  * This implements the F_GETLK command of fcntl().
+  */
+-int fcntl_getlk64(struct file *filp, struct flock64 __user *l)
++int fcntl_getlk64(struct file *filp, unsigned int cmd, struct flock64 __user *l)
+ {
+ 	struct file_lock file_lock;
+ 	struct flock64 flock;
+@@ -1924,6 +1988,16 @@ int fcntl_getlk64(struct file *filp, struct flock64 __user *l)
+ 	if (error)
+ 		goto out;
+ 
++	if (cmd == F_OFD_GETLK) {
++		error = -EINVAL;
++		if (flock.l_pid != 0)
++			goto out;
++
++		cmd = F_GETLK64;
++		file_lock.fl_flags |= FL_OFDLCK;
++		file_lock.fl_owner = (fl_owner_t)filp;
++	}
++
+ 	error = vfs_test_lock(filp, &file_lock);
+ 	if (error)
+ 		goto out;
+@@ -1975,10 +2049,34 @@ int fcntl_setlk64(unsigned int fd, struct file *filp, unsigned int cmd,
+ 	error = flock64_to_posix_lock(filp, file_lock, &flock);
+ 	if (error)
+ 		goto out;
+-	if (cmd == F_SETLKW64) {
++
++	/*
++	 * If the cmd is requesting file-private locks, then set the
++	 * FL_OFDLCK flag and override the owner.
++	 */
++	switch (cmd) {
++	case F_OFD_SETLK:
++		error = -EINVAL;
++		if (flock.l_pid != 0)
++			goto out;
++
++		cmd = F_SETLK64;
++		file_lock->fl_flags |= FL_OFDLCK;
++		file_lock->fl_owner = (fl_owner_t)filp;
++		break;
++	case F_OFD_SETLKW:
++		error = -EINVAL;
++		if (flock.l_pid != 0)
++			goto out;
++
++		cmd = F_SETLKW64;
++		file_lock->fl_flags |= FL_OFDLCK;
++		file_lock->fl_owner = (fl_owner_t)filp;
++		/* Fallthrough */
++	case F_SETLKW64:
+ 		file_lock->fl_flags |= FL_SLEEP;
+ 	}
+-	
++
+ 	error = -EBADF;
+ 	switch (flock.l_type) {
+ 	case F_RDLCK:
+@@ -1999,10 +2097,12 @@ int fcntl_setlk64(unsigned int fd, struct file *filp, unsigned int cmd,
+ 	error = do_lock_file_wait(filp, cmd, file_lock);
+ 
+ 	/*
+-	 * Attempt to detect a close/fcntl race and recover by
+-	 * releasing the lock that was just acquired.
++	 * Attempt to detect a close/fcntl race and recover by releasing the
++	 * lock that was just acquired. There is no need to do that when we're
++	 * unlocking though, or for OFD locks.
+ 	 */
+-	if (!error && file_lock->fl_type != F_UNLCK) {
++	if (!error && file_lock->fl_type != F_UNLCK &&
++	    !(file_lock->fl_flags & FL_OFDLCK)) {
+ 		/*
+ 		 * We need that spin_lock here - it prevents reordering between
+ 		 * update of inode->i_flock and check for it done in
+@@ -2062,7 +2162,7 @@ EXPORT_SYMBOL(locks_remove_posix);
+ /*
+  * This function is called on the last close of an open file.
+  */
+-void locks_remove_flock(struct file *filp)
++void locks_remove_file(struct file *filp)
+ {
+ 	struct inode * inode = file_inode(filp);
+ 	struct file_lock *fl;
+@@ -2071,6 +2171,8 @@ void locks_remove_flock(struct file *filp)
+ 	if (!inode->i_flock)
+ 		return;
+ 
++	locks_remove_posix(filp, (fl_owner_t)filp);
++
+ 	if (filp->f_op && filp->f_op->flock) {
+ 		struct file_lock fl = {
+ 			.fl_pid = current->tgid,
+@@ -2089,16 +2191,28 @@ void locks_remove_flock(struct file *filp)
+ 
+ 	while ((fl = *before) != NULL) {
+ 		if (fl->fl_file == filp) {
+-			if (IS_FLOCK(fl)) {
+-				locks_delete_lock(before);
+-				continue;
+-			}
+ 			if (IS_LEASE(fl)) {
+ 				lease_modify(before, F_UNLCK);
+ 				continue;
+ 			}
+-			/* What? */
+-			BUG();
++
++			/*
++			 * There's a leftover lock on the list of a type that
++			 * we didn't expect to see. Most likely a classic
++			 * POSIX lock that ended up not getting released
++			 * properly, or that raced onto the list somehow. Log
++			 * some info about it and then just remove it from
++			 * the list.
++			 */
++			WARN(!IS_FLOCK(fl),
++				"leftover lock: dev=%u:%u ino=%lu type=%hhd flags=0x%x start=%lld end=%lld\n",
++				MAJOR(inode->i_sb->s_dev),
++				MINOR(inode->i_sb->s_dev), inode->i_ino,
++				fl->fl_type, fl->fl_flags,
++				fl->fl_start, fl->fl_end);
++
++			locks_delete_lock(before);
++			continue;
+  		}
+ 		before = &fl->fl_next;
+ 	}
+@@ -2164,8 +2278,14 @@ static void lock_get_status(struct seq_file *f, struct file_lock *fl,
+ 
+ 	seq_printf(f, "%lld:%s ", id, pfx);
+ 	if (IS_POSIX(fl)) {
+-		seq_printf(f, "%6s %s ",
+-			     (fl->fl_flags & FL_ACCESS) ? "ACCESS" : "POSIX ",
++		if (fl->fl_flags & FL_ACCESS)
++			seq_printf(f, "ACCESS");
++		else if (IS_OFDLCK(fl))
++			seq_printf(f, "OFDLCK");
++		else
++			seq_printf(f, "POSIX ");
++
++		seq_printf(f, " %s ",
+ 			     (inode == NULL) ? "*NOINODE*" :
+ 			     mandatory_lock(inode) ? "MANDATORY" : "ADVISORY ");
+ 	} else if (IS_FLOCK(fl)) {
+diff --git a/fs/namei.c b/fs/namei.c
+index c88b700fe897..66c5669cc5d3 100644
+--- a/fs/namei.c
++++ b/fs/namei.c
+@@ -2456,7 +2456,7 @@ static int handle_truncate(struct file *filp)
+ 	/*
+ 	 * Refuse to truncate files with mandatory locks held on them.
+ 	 */
+-	error = locks_verify_locked(inode);
++	error = locks_verify_locked(filp);
+ 	if (!error)
+ 		error = security_path_truncate(path);
+ 	if (!error) {
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 2e9039538839..e1b7f6887c9b 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -938,6 +938,7 @@ static inline int file_check_writeable(struct file *filp)
+ #define FL_SLEEP	128	/* A blocking lock */
+ #define FL_DOWNGRADE_PENDING	256 /* Lease is being downgraded */
+ #define FL_UNLOCK_PENDING	512 /* Lease is being broken */
++#define FL_OFDLCK	1024	/* lock is "owned" by struct file */
+ 
+ /*
+  * Special return value from posix_lock_file() and vfs_lock_file() for
+@@ -1022,12 +1023,12 @@ struct file_lock {
+ extern void send_sigio(struct fown_struct *fown, int fd, int band);
+ 
+ #ifdef CONFIG_FILE_LOCKING
+-extern int fcntl_getlk(struct file *, struct flock __user *);
++extern int fcntl_getlk(struct file *, unsigned int, struct flock __user *);
+ extern int fcntl_setlk(unsigned int, struct file *, unsigned int,
+ 			struct flock __user *);
+ 
+ #if BITS_PER_LONG == 32
+-extern int fcntl_getlk64(struct file *, struct flock64 __user *);
++extern int fcntl_getlk64(struct file *, unsigned int, struct flock64 __user *);
+ extern int fcntl_setlk64(unsigned int, struct file *, unsigned int,
+ 			struct flock64 __user *);
+ #endif
+@@ -1042,7 +1043,7 @@ extern struct file_lock * locks_alloc_lock(void);
+ extern void locks_copy_lock(struct file_lock *, struct file_lock *);
+ extern void __locks_copy_lock(struct file_lock *, const struct file_lock *);
+ extern void locks_remove_posix(struct file *, fl_owner_t);
+-extern void locks_remove_flock(struct file *);
++extern void locks_remove_file(struct file *);
+ extern void locks_release_private(struct file_lock *);
+ extern void posix_test_lock(struct file *, struct file_lock *);
+ extern int posix_lock_file(struct file *, struct file_lock *, struct file_lock *);
+@@ -1063,7 +1064,8 @@ extern void locks_delete_block(struct file_lock *waiter);
+ extern void lock_flocks(void);
+ extern void unlock_flocks(void);
+ #else /* !CONFIG_FILE_LOCKING */
+-static inline int fcntl_getlk(struct file *file, struct flock __user *user)
++static inline int fcntl_getlk(struct file *file, unsigned int cmd,
++			      struct flock __user *user)
+ {
+ 	return -EINVAL;
+ }
+@@ -1075,7 +1077,8 @@ static inline int fcntl_setlk(unsigned int fd, struct file *file,
+ }
+ 
+ #if BITS_PER_LONG == 32
+-static inline int fcntl_getlk64(struct file *file, struct flock64 __user *user)
++static inline int fcntl_getlk64(struct file *file, unsigned int cmd,
++				struct flock64 __user *user)
+ {
+ 	return -EINVAL;
+ }
+@@ -1116,7 +1119,7 @@ static inline void locks_remove_posix(struct file *filp, fl_owner_t owner)
+ 	return;
+ }
+ 
+-static inline void locks_remove_flock(struct file *filp)
++static inline void locks_remove_file(struct file *filp)
+ {
+ 	return;
+ }
+@@ -1976,6 +1979,11 @@ extern bool our_mnt(struct vfsmount *mnt);
+ 
+ extern int current_umask(void);
+ 
++static inline struct inode *file_inode(struct file *f)
++{
++	return f->f_inode;
++}
++
+ /* /sys/fs */
+ extern struct kobject *fs_kobj;
+ 
+@@ -1986,7 +1994,7 @@ extern int rw_verify_area(int, struct file *, loff_t *, size_t);
+ #define FLOCK_VERIFY_WRITE 2
+ 
+ #ifdef CONFIG_FILE_LOCKING
+-extern int locks_mandatory_locked(struct inode *);
++extern int locks_mandatory_locked(struct file *);
+ extern int locks_mandatory_area(int, struct inode *, struct file *, loff_t, size_t);
+ 
+ /*
+@@ -2009,10 +2017,10 @@ static inline int mandatory_lock(struct inode *ino)
+ 	return IS_MANDLOCK(ino) && __mandatory_lock(ino);
+ }
+ 
+-static inline int locks_verify_locked(struct inode *inode)
++static inline int locks_verify_locked(struct file *file)
+ {
+-	if (mandatory_lock(inode))
+-		return locks_mandatory_locked(inode);
++	if (mandatory_lock(file_inode(file)))
++		return locks_mandatory_locked(file);
+ 	return 0;
+ }
+ 
+@@ -2037,7 +2045,7 @@ static inline int break_lease(struct inode *inode, unsigned int mode)
+ 	return 0;
+ }
+ #else /* !CONFIG_FILE_LOCKING */
+-static inline int locks_mandatory_locked(struct inode *inode)
++static inline int locks_mandatory_locked(struct file *file)
+ {
+ 	return 0;
+ }
+@@ -2059,7 +2067,7 @@ static inline int mandatory_lock(struct inode *inode)
+ 	return 0;
+ }
+ 
+-static inline int locks_verify_locked(struct inode *inode)
++static inline int locks_verify_locked(struct file *file)
+ {
+ 	return 0;
+ }
+@@ -2310,11 +2318,6 @@ static inline bool execute_ok(struct inode *inode)
+ 	return (inode->i_mode & S_IXUGO) || S_ISDIR(inode->i_mode);
+ }
+ 
+-static inline struct inode *file_inode(struct file *f)
+-{
+-	return f->f_inode;
+-}
+-
+ static inline void file_start_write(struct file *file)
+ {
+ 	if (!S_ISREG(file_inode(file)->i_mode))
+diff --git a/include/uapi/asm-generic/fcntl.h b/include/uapi/asm-generic/fcntl.h
+index 971098f16ae2..05491eb2094d 100644
+--- a/include/uapi/asm-generic/fcntl.h
++++ b/include/uapi/asm-generic/fcntl.h
+@@ -135,6 +135,22 @@
+ #define F_GETOWNER_UIDS	17
+ #endif
+ 
++/*
++ * Open File Description Locks
++ *
++ * Usually record locks held by a process are released on *any* close and are
++ * not inherited across a fork().
++ *
++ * These cmd values will set locks that conflict with process-associated
++ * record  locks, but are "owned" by the open file description, not the
++ * process. This means that they are inherited across fork() like BSD (flock)
++ * locks, and they are only released automatically when the last reference to
++ * the the open file against which they were acquired is put.
++ */
++#define F_OFD_GETLK	36
++#define F_OFD_SETLK	37
++#define F_OFD_SETLKW	38
++
+ #define F_OWNER_TID	0
+ #define F_OWNER_PID	1
+ #define F_OWNER_PGRP	2
+diff --git a/mm/mmap.c b/mm/mmap.c
+index 96b55c60d5dd..61e75c95f68e 100644
+--- a/mm/mmap.c
++++ b/mm/mmap.c
+@@ -1319,7 +1319,7 @@ unsigned long do_mmap_pgoff(struct file *file, unsigned long addr,
+ 			/*
+ 			 * Make sure there are no mandatory locks on the file.
+ 			 */
+-			if (locks_verify_locked(inode))
++			if (locks_verify_locked(file))
+ 				return -EAGAIN;
+ 
+ 			vm_flags |= VM_SHARED | VM_MAYSHARE;
+diff --git a/mm/nommu.c b/mm/nommu.c
+index d9d07a5d2318..71737c999224 100644
+--- a/mm/nommu.c
++++ b/mm/nommu.c
+@@ -992,7 +992,7 @@ static int validate_mmap_request(struct file *file,
+ 			    (file->f_mode & FMODE_WRITE))
+ 				return -EACCES;
+ 
+-			if (locks_verify_locked(file_inode(file)))
++			if (locks_verify_locked(file))
+ 				return -EAGAIN;
+ 
+ 			if (!(capabilities & BDI_CAP_MAP_DIRECT))
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 4f8967e8aa34..088d2fc69cbf 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -3609,6 +3609,9 @@ static int selinux_file_fcntl(struct file *file, unsigned int cmd,
+ 	case F_GETLK:
+ 	case F_SETLK:
+ 	case F_SETLKW:
++	case F_OFD_GETLK:
++	case F_OFD_SETLK:
++	case F_OFD_SETLKW:
+ #if BITS_PER_LONG == 32
+ 	case F_GETLK64:
+ 	case F_SETLK64:

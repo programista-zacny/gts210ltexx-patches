@@ -1,0 +1,12 @@
+Replacements for patch files of rINanDO's gts210wifi-patches that no longer apply to the
+current LineageOS branch. Each file has the same name and path as the one it replaces under
+patches-rinando/; copy it over before running rINanDO's apply.sh.
+
+LOS-24.0/android_vendor_lineage/0002-BoardConfigKernel-Preserve-device-kernel-flags-for-p.patch
+    rINanDO's patch, same author and content, rebased on lineage-24.0 after the upstream change
+    "kernel: Kill RBE support" altered its context. Exported from the hand-resolved commit of
+    build 10 (974c63a) and verified to apply with git am on the upstream base (1b39c38) after
+    rINanDO's 0001; the result is identical to that commit. It is needed: it keeps the GCC make
+    flags of the 3.10 kernel.
+
+    cp -r rinando-fixes/LOS-24.0/. patches-rinando/LOS-24.0/

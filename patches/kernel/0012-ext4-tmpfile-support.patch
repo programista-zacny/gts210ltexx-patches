@@ -1,0 +1,122 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] ext4: ->tmpfile() support
+
+Implement ->tmpfile for ext4 so that open(dir, O_TMPFILE | O_WRONLY)
+works on /data and /cache. The inode is created without a directory
+entry and put on the orphan list, so that it is reclaimed after a crash;
+when it is given a name with linkat() for the first time ext4_link()
+takes it off the orphan list again.
+
+Android's tombstoned creates its temporary tombstone files this way
+(openat(dir, ".", O_WRONLY | O_APPEND | O_TMPFILE | O_CLOEXEC)) and
+aborts when it fails; the port currently carries a tombstoned patch that
+falls back to named temporary files.
+
+This is the function as it stands in v3.18, i.e. the original with the
+two fixes that followed it.
+
+Derived from upstream:
+  af51a2ac36d1 "ext4: ->tmpfile() support"
+  e94bd3490f4e "ext4: fix a BUG when opening a file with O_TMPFILE flag"
+               (d_tmpfile() before ext4_orphan_add(), which wants
+               i_nlink == 0)
+  43ae9e3fc70c "ext[34]: fix double put in tmpfile" (no iput() on the
+               error path once the dentry owns the inode)
+
+Adapted for 3.10: nothing in the code itself. Everything it calls is
+already here with the signature upstream had at the time:
+ext4_new_inode_start_handle() (a NULL qstr is fine for the Orlov
+allocator and for security_inode_init_security()), ext4_orphan_add(),
+ext4_orphan_del(), ext4_set_aops(). 3.10's ext4_orphan_add() does not yet
+assert that i_mutex is held, so calling it on the new, still locked
+inode is fine.
+
+Needs d_tmpfile() and I_LINKABLE from "vfs: add d_tmpfile() and let
+O_TMPFILE files be linked".
+
+Not compile-tested, not run: before it is trusted with /data, create,
+write, link and abandon temporary files on a scratch ext4 filesystem,
+cut power with one open, and check that e2fsck -fn is clean after the
+next mount.
+---
+ fs/ext4/namei.c | 46 +++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 45 insertions(+), 1 deletion(-)
+
+diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
+index 25f9835..fe7c624 100644
+--- a/fs/ext4/namei.c
++++ b/fs/ext4/namei.c
+@@ -2403,6 +2403,44 @@ retry:
+ 	return err;
+ }
+ 
++static int ext4_tmpfile(struct inode *dir, struct dentry *dentry, umode_t mode)
++{
++	handle_t *handle;
++	struct inode *inode;
++	int err, retries = 0;
++
++	dquot_initialize(dir);
++
++retry:
++	inode = ext4_new_inode_start_handle(dir, mode,
++					    NULL, 0, NULL,
++					    EXT4_HT_DIR,
++			EXT4_MAXQUOTAS_INIT_BLOCKS(dir->i_sb) +
++			  4 + EXT4_XATTR_TRANS_BLOCKS);
++	handle = ext4_journal_current_handle();
++	err = PTR_ERR(inode);
++	if (!IS_ERR(inode)) {
++		inode->i_op = &ext4_file_inode_operations;
++		inode->i_fop = &ext4_file_operations;
++		ext4_set_aops(inode);
++		d_tmpfile(dentry, inode);
++		err = ext4_orphan_add(handle, inode);
++		if (err)
++			goto err_unlock_inode;
++		mark_inode_dirty(inode);
++		unlock_new_inode(inode);
++	}
++	if (handle)
++		ext4_journal_stop(handle);
++	if (err == -ENOSPC && ext4_should_retry_alloc(dir->i_sb, &retries))
++		goto retry;
++	return err;
++err_unlock_inode:
++	ext4_journal_stop(handle);
++	unlock_new_inode(inode);
++	return err;
++}
++
+ struct ext4_dir_entry_2 *ext4_init_dot_dotdot(struct inode *inode,
+ 			  struct ext4_dir_entry_2 *de,
+ 			  int blocksize, int csum_size,
+@@ -3028,7 +3066,7 @@ static int ext4_link(struct dentry *old_dentry,
+ retry:
+ 	handle = ext4_journal_start(dir, EXT4_HT_DIR,
+ 		(EXT4_DATA_TRANS_BLOCKS(dir->i_sb) +
+-		 EXT4_INDEX_EXTRA_TRANS_BLOCKS));
++		 EXT4_INDEX_EXTRA_TRANS_BLOCKS) + 1);
+ 	if (IS_ERR(handle))
+ 		return PTR_ERR(handle);
+ 
+@@ -3042,6 +3080,11 @@ retry:
+ 	err = ext4_add_entry(handle, dentry, inode);
+ 	if (!err) {
+ 		ext4_mark_inode_dirty(handle, inode);
++		/* this can happen only for tmpfile being
++		 * linked the first time
++		 */
++		if (inode->i_nlink == 1)
++			ext4_orphan_del(handle, inode);
+ 		d_instantiate(dentry, inode);
+ 	} else {
+ 		drop_nlink(inode);
+@@ -3316,6 +3359,7 @@ const struct inode_operations ext4_dir_inode_operations = {
+ 	.removexattr	= generic_removexattr,
+ 	.get_acl	= ext4_get_acl,
+ 	.fiemap         = ext4_fiemap,
++	.tmpfile	= ext4_tmpfile,
+ };
+ 
+ const struct inode_operations ext4_special_inode_operations = {

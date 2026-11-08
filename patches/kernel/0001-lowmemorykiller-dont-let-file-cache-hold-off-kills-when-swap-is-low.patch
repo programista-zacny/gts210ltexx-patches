@@ -1,0 +1,77 @@
+From 0ec581afdee2fc8cd8cc7721799ac2e315a1e3df Mon Sep 17 00:00:00 2001
+From: Dominggoes Isakh <drjisakh@gmail.com>
+Date: Fri, 30 Oct 2026 17:06:52 +0100
+Subject: [PATCH] staging: android: lowmemorykiller: don't let file cache hold
+ off kills when swap is low
+
+The killer only acts when both free memory and the file cache are below
+minfree. On gts210wifi with 1.4 GB of zram, a heavy app mix filled swap
+completely while about 370 MB of file cache, mostly code of running apps,
+stayed above the 180 MB minfree for cached apps. Anonymous memory could no
+longer be reclaimed, so nothing was killed and the system thrashed: 4000+
+direct reclaim stalls and 200k major faults in 14 minutes after boot.
+
+When free swap drops below swap_free_low_percent (default 10, 0 disables;
+module parameter) of total swap, treat other_file as 0 so free memory
+alone decides. Kills still go to the highest oom_score_adj first, and
+every kill frees swap, so this switches itself off again above the
+threshold.
+
+Tested on gts210wifi: swap now levels off at ~90% instead of 100%, cached
+apps (adj 930-996) are killed instead, and direct reclaim stalls dropped
+from ~260 to ~19 per minute.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Change-Id: I8c6db94d6b4a167c5298a9401d6a6e7b635517e5
+---
+ drivers/staging/android/lowmemorykiller.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/drivers/staging/android/lowmemorykiller.c b/drivers/staging/android/lowmemorykiller.c
+index 0d30354..b2eed45 100644
+--- a/drivers/staging/android/lowmemorykiller.c
++++ b/drivers/staging/android/lowmemorykiller.c
+@@ -62,6 +62,12 @@ static int lowmem_minfree_size = 4;
+ 
+ static unsigned long lowmem_deathpending_timeout;
+ 
++/*
++ * Below this percentage of free swap, the file cache no longer holds off
++ * the killer (0 disables it). See lowmem_shrink().
++ */
++static uint32_t lowmem_swap_free_low_percent = 10;
++
+ #define lowmem_print(level, x...)			\
+ 	do {						\
+ 		if (lowmem_debug_level >= (level))	\
+@@ -86,6 +92,18 @@ static int lowmem_shrink(struct shrinker *s, struct shrink_control *sc)
+ 						global_page_state(NR_UNEVICTABLE) -
+ 						total_swapcache_pages();
+ 
++	/*
++	 * With swap (zram) nearly full, anonymous memory can't be reclaimed
++	 * any more and what is left of the file cache is mostly the code of
++	 * running apps. It gets evicted and read back over and over while
++	 * other_file stays above minfree, so nothing is killed and the
++	 * system thrashes. Let free memory alone decide in that case.
++	 */
++	if (lowmem_swap_free_low_percent && total_swap_pages > 0 &&
++	    get_nr_swap_pages() * 100 <
++	    total_swap_pages * lowmem_swap_free_low_percent)
++		other_file = 0;
++
+ 	if (lowmem_adj_size < array_size)
+ 		array_size = lowmem_adj_size;
+ 	if (lowmem_minfree_size < array_size)
+@@ -297,6 +315,8 @@ module_param_array_named(adj, lowmem_adj, short, &lowmem_adj_size,
+ module_param_array_named(minfree, lowmem_minfree, uint, &lowmem_minfree_size,
+ 			 S_IRUGO | S_IWUSR);
+ module_param_named(debug_level, lowmem_debug_level, uint, S_IRUGO | S_IWUSR);
++module_param_named(swap_free_low_percent, lowmem_swap_free_low_percent, uint,
++		   S_IRUGO | S_IWUSR);
+ 
+ module_init(lowmem_init);
+ module_exit(lowmem_exit);
+-- 
+2.56.0
+

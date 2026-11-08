@@ -1,0 +1,66 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] usb: gadget: f_fs: drop the kiocb reference in
+ ffs_aio_cancel(), fix async error paths
+
+The AIO backport (3adb350) took ffs_aio_cancel() from v3.16, where the aio
+core no longer refcounts kiocbs. In this 3.10 tree kiocb_cancel() still
+does atomic_inc(&kiocb->ki_users) before calling ->ki_cancel() and relies
+on the callback to drop that reference with aio_put_req(), as gadgetfs
+does in ep_aio_cancel() (inode.c). ffs_aio_cancel() did not, so every
+cancelled request leaked its kiocb together with its reference on the
+endpoint file.
+
+adbd always has reads pending on the bulk-out endpoint. When it exits
+("adb root", "adb unroot", "adb tcpip", a crash, "stop adbd"), exit_aio()
+cancels them, the kiocbs are never freed, ep1 is never released,
+ffs->opened never reaches zero and functionfs_closed_callback() is never
+called. The gadget stays enumerated with a dead function, the restarted
+adbd cannot write its descriptors to an ep0 that is still FFS_ACTIVE, and
+adb is gone until reboot. Seen on gts210ltexx: after "adb root" the host
+kept 04e8:6860 with no USB disconnect and no adb device for six minutes.
+
+While here, fix two more defects in the async submit path:
+- the two failure branches after ffs_mutex_lock() returned without
+  releasing epfile->mutex, blocking all later I/O on that endpoint;
+- usb_ep_alloc_request() was called with GFP_KERNEL under eps_lock with
+  interrupts disabled.
+---
+--- a/drivers/usb/gadget/f_fs.c
++++ b/drivers/usb/gadget/f_fs.c
+@@ -975,10 +975,11 @@
+ 		struct usb_request *req;
+ 
+ 		if (io_data->aio) {
+-			req = usb_ep_alloc_request(ep->ep, GFP_KERNEL);
++			req = usb_ep_alloc_request(ep->ep, GFP_ATOMIC);
+ 			if (unlikely(!req)) {
+ 				ret = -ENOMEM;
+ 				spin_unlock_irq(&epfile->ffs->eps_lock);
++				mutex_unlock(&epfile->mutex);
+ 				goto error;
+ 			}
+ 
+@@ -996,6 +997,7 @@
+ 			if (unlikely(ret)) {
+ 				usb_ep_free_request(ep->ep, req);
+ 				spin_unlock_irq(&epfile->ffs->eps_lock);
++				mutex_unlock(&epfile->mutex);
+ 				goto error;
+ 			}
+ 			ret = -EIOCBQUEUED;
+@@ -1131,6 +1133,15 @@
+ 
+ 	spin_unlock_irq(&epfile->ffs->eps_lock);
+ 
++	/*
++	 * In this kernel kiocb_cancel() takes a reference on the kiocb before
++	 * calling ->ki_cancel() and expects the callback to drop it (see
++	 * ep_aio_cancel() in inode.c). Without this the kiocb is never freed,
++	 * its struct file is never released and the function can never be
++	 * closed and re-opened.
++	 */
++	aio_put_req(kiocb);
++
+ 	return value;
+ }
+ 

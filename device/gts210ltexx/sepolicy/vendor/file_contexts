@@ -1,0 +1,5 @@
+# Vulkan driver. The image declares android.hardware.vulkan.* and ships the Mali r22p0 driver as
+# vulkan.exynos5.so (ro.board.platform), but samsung_slsi only labels vulkan.mali.so as a
+# same-process HAL, so apps were denied reading the driver (first seen from microG's WebView GPU
+# thread, 2026-11-06).
+/(vendor|system/vendor)/lib(64)?/hw/vulkan\.exynos5\.so    u:object_r:same_process_hal_file:s0

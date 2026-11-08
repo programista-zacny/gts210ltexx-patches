@@ -1,0 +1,147 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] mm,fork: introduce MADV_WIPEONFORK
+
+MADV_WIPEONFORK makes a private anonymous mapping come up empty (zero
+filled) in the child after fork(), while it stays valid there, unlike
+MADV_DONTFORK. MADV_KEEPONFORK undoes it.
+
+Userspace uses it for fork detection in random number generators:
+- bionic's arc4random keeps its state in such a mapping and aborts when
+  the madvise() fails. The LineageOS port removes the call ("arc4random:
+  Don't use MADV_WIPEONFORK and die"), which leaves arc4random without
+  any fork detection: every process forked from zygote starts with
+  zygote's arc4random state.
+- BoringSSL probes for it at run time (madvise(MADV_WIPEONFORK) on a
+  scratch page). Without it, it treats fork detection as unavailable and
+  draws fresh entropy from the kernel on every call.
+
+With this in the kernel that bionic patch can be dropped. Note that
+BoringSSL starts relying on the wipe as soon as the madvise() succeeds,
+without any userspace change, so the wipe has to be verified on the
+device (map, MADV_WIPEONFORK, write, fork, read in the child).
+
+Derived from upstream:
+  d2cd9ede6e19 "mm,fork: introduce MADV_WIPEONFORK"
+  93949bb21b52 "mm: don't prepare anon_vma if vma has VM_WIPEONFORK"
+               (folded in: the original called anon_vma_prepare() on the
+               child's vma while it still carried the parent's vm_next and
+               vm_prev)
+
+Adapted for 3.10:
+- VM_WIPEONFORK takes 0x02000000 as upstream; that bit is unused here
+  (upstream first had to move the MPX flag out of the way, df3735c5b40f).
+- No include/trace/events/mmflags.h in 3.10, so no trace name; the smaps
+  VmFlags mnemonic "wf" is added.
+- Only asm-generic/mman-common.h gets the constants (ARM uses it); the
+  alpha, mips, parisc and xtensa headers are left alone.
+- vm_flags comparison in vma_merge() is a plain XOR in 3.10, so a
+  WIPEONFORK range never merges with a neighbour that lacks the flag.
+
+Not compile-tested.
+---
+ fs/proc/task_mmu.c                     |  1 +
+ include/linux/mm.h                     |  1 +
+ include/uapi/asm-generic/mman-common.h |  3 +++
+ kernel/fork.c                          | 12 ++++++++++--
+ mm/madvise.c                           | 13 +++++++++++++
+ 5 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 8af7c9e..ff7cf34 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -623,6 +623,7 @@ static void show_smap_vma_flags(struct seq_file *m, struct vm_area_struct *vma)
+ 		[ilog2(VM_HUGETLB)]	= "ht",
+ 		[ilog2(VM_NONLINEAR)]	= "nl",
+ 		[ilog2(VM_ARCH_1)]	= "ar",
++		[ilog2(VM_WIPEONFORK)]	= "wf",
+ 		[ilog2(VM_DONTDUMP)]	= "dd",
+ 		[ilog2(VM_MIXEDMAP)]	= "mm",
+ 		[ilog2(VM_HUGEPAGE)]	= "hg",
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index b5fd334..ceb4d60 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -118,6 +118,7 @@ extern unsigned int kobjsize(const void *objp);
+ #define VM_HUGETLB	0x00400000	/* Huge TLB Page VM */
+ #define VM_NONLINEAR	0x00800000	/* Is non-linear (remap_file_pages) */
+ #define VM_ARCH_1	0x01000000	/* Architecture-specific flag */
++#define VM_WIPEONFORK	0x02000000	/* Wipe VMA contents in child. */
+ #define VM_DONTDUMP	0x04000000	/* Do not include in the core dump */
+ 
+ #define VM_MIXEDMAP	0x10000000	/* Can contain "struct page" and pure PFN pages */
+diff --git a/include/uapi/asm-generic/mman-common.h b/include/uapi/asm-generic/mman-common.h
+index 4164529..e359fbc 100644
+--- a/include/uapi/asm-generic/mman-common.h
++++ b/include/uapi/asm-generic/mman-common.h
+@@ -52,6 +52,9 @@
+ 					   overrides the coredump filter bits */
+ #define MADV_DODUMP	17		/* Clear the MADV_NODUMP flag */
+ 
++#define MADV_WIPEONFORK 18		/* Zero memory on fork, child only */
++#define MADV_KEEPONFORK 19		/* Undo MADV_WIPEONFORK */
++
+ /* compatibility flags */
+ #define MAP_FILE	0
+ 
+diff --git a/kernel/fork.c b/kernel/fork.c
+index c517fa3..09994f1 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -431,7 +431,14 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 		if (retval)
+ 			goto fail_nomem_policy;
+ 		tmp->vm_mm = mm;
+-		if (anon_vma_fork(tmp, mpnt))
++		if (tmp->vm_flags & VM_WIPEONFORK) {
++			/*
++			 * VM_WIPEONFORK gets a clean slate in the child.
++			 * Don't prepare anon_vma until fault since we don't
++			 * copy page for current vma.
++			 */
++			tmp->anon_vma = NULL;
++		} else if (anon_vma_fork(tmp, mpnt))
+ 			goto fail_nomem_anon_vma_fork;
+ 		tmp->vm_flags &= ~VM_LOCKED;
+ 		tmp->vm_next = tmp->vm_prev = NULL;
+@@ -479,7 +486,8 @@ static int dup_mmap(struct mm_struct *mm, struct mm_struct *oldmm)
+ 		rb_parent = &tmp->vm_rb;
+ 
+ 		mm->map_count++;
+-		retval = copy_page_range(mm, oldmm, mpnt);
++		if (!(tmp->vm_flags & VM_WIPEONFORK))
++			retval = copy_page_range(mm, oldmm, mpnt);
+ 
+ 		if (tmp->vm_ops && tmp->vm_ops->open)
+ 			tmp->vm_ops->open(tmp);
+diff --git a/mm/madvise.c b/mm/madvise.c
+index 85d1a54..6ab2b0b 100644
+--- a/mm/madvise.c
++++ b/mm/madvise.c
+@@ -71,6 +71,17 @@ static long madvise_behavior(struct vm_area_struct * vma,
+ 		}
+ 		new_flags &= ~VM_DONTCOPY;
+ 		break;
++	case MADV_WIPEONFORK:
++		/* MADV_WIPEONFORK is only supported on anonymous memory. */
++		if (vma->vm_file || vma->vm_flags & VM_SHARED) {
++			error = -EINVAL;
++			goto out;
++		}
++		new_flags |= VM_WIPEONFORK;
++		break;
++	case MADV_KEEPONFORK:
++		new_flags &= ~VM_WIPEONFORK;
++		break;
+ 	case MADV_DONTDUMP:
+ 		new_flags |= VM_DONTDUMP;
+ 		break;
+@@ -408,6 +419,8 @@ madvise_behavior_valid(int behavior)
+ #endif
+ 	case MADV_DONTDUMP:
+ 	case MADV_DODUMP:
++	case MADV_WIPEONFORK:
++	case MADV_KEEPONFORK:
+ 		return 1;
+ 
+ 	default:

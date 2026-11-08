@@ -1,0 +1,73 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] init: do not make the cpuctl tasks files world-writable
+
+init.samsung.rc set mode 0666 on three files of the cpu cgroup hierarchy:
+
+  /dev/cpuctl/tasks
+  /dev/cpuctl/bg_cached/tasks
+  /dev/cpuctl/bg_abnormal/tasks
+
+Writing a thread id to such a file moves the thread into that cgroup.
+With the permission check this kernel had for the cpu hierarchy (it
+allowed every writer, see kernel patch "cgroup: one credential rule for
+moving another user's task"), any process that could open one of the
+files could move any thread of any user there; SELinux still kept app
+domains out (only "domain -appdomain" may write cgroup files), every
+native daemon could.
+
+Nothing needs the mode:
+- bg_cached and bg_abnormal are groups of Samsung's own framework. No
+  file of this tree other than init.samsung.rc names them, and neither
+  does any blob under vendor/samsung (searched for "cpuctl", "bg_cached"
+  and "bg_abnormal" in sources and binaries).
+- Android's task profiles (system/core/libprocessgroup/profiles/
+  task_profiles.json) never join the root group of the cpu controller;
+  they use foreground, background, top-app, system, system-background,
+  rt, dex2oat, camera-daemon, nnapi-hal and foreground_window, whose
+  files init.rc sets to system:system 0664.
+- The processes that move other users' threads are init, zygote and the
+  power HAL (root), and system_server and lmkd (CAP_SYS_NICE, with the
+  system uid or gid for the files).
+
+Remove the three chmod lines. /dev/cpuctl/tasks keeps the 0664 that
+init.rc has already given it when this action runs (init.rc's "on init"
+is parsed first), the other two keep the kernel's default 0644; all
+three stay owned by system through the chown lines above them, which
+are unchanged.
+
+Verified by reading only; not built, not run.
+---
+ rootdir/etc/init.samsung.rc | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/rootdir/etc/init.samsung.rc b/rootdir/etc/init.samsung.rc
+index 0f6e767..004d4b5 100644
+--- a/rootdir/etc/init.samsung.rc
++++ b/rootdir/etc/init.samsung.rc
+@@ -22,7 +22,9 @@ on init
+     mount cgroup none /dev/cpuctl cpu
+     chown system system /dev/cpuctl
+     chown system system /dev/cpuctl/tasks
+-    chmod 0666 /dev/cpuctl/tasks
++    # (No "chmod 0666" on the tasks files of /dev/cpuctl, bg_cached and bg_abnormal any more:
++    # world-writable, they let every process move itself into these groups. Nothing needs it;
++    # /dev/cpuctl/tasks keeps the 0664 that init.rc gives it, the other two the kernel's 0644.)
+     write /dev/cpuctl/cpu.shares 1024
+     write /dev/cpuctl/cpu.rt_period_us 1000000
+     write /dev/cpuctl/cpu.rt_runtime_us 950000
+@@ -31,7 +33,6 @@ on init
+     chown system system /dev/cpuctl/bg_cached/tasks
+     chown system system /dev/cpuctl/bg_cached/cpu.cfs_period_us
+     chown system system /dev/cpuctl/bg_cached/cpu.cfs_quota_us
+-    chmod 0666 /dev/cpuctl/bg_cached/tasks
+     chmod 0664 /dev/cpuctl/bg_cached/cpu.cfs_period_us
+     chmod 0664 /dev/cpuctl/bg_cached/cpu.cfs_quota_us
+     write /dev/cpuctl/bg_cached/cpu.rt_runtime_us 700000
+@@ -43,7 +44,6 @@ on init
+     chown system system /dev/cpuctl/bg_abnormal/tasks
+     chown system system /dev/cpuctl/bg_abnormal/cpu.cfs_period_us
+     chown system system /dev/cpuctl/bg_abnormal/cpu.cfs_quota_us
+-    chmod 0666 /dev/cpuctl/bg_abnormal/tasks
+     chmod 0664 /dev/cpuctl/bg_abnormal/cpu.cfs_period_us
+     chmod 0664 /dev/cpuctl/bg_abnormal/cpu.cfs_quota_us
+     write /dev/cpuctl/bg_abnormal/cpu.rt_runtime_us 700000

@@ -1,0 +1,7 @@
+# fixes-3 item 1. gts2-common's init.universal5433.rc mounts a tmpfs on /metadata at early-init
+# and then runs "restorecon /metadata". The rc file is read from /vendor/etc/init, so the
+# restorecon runs as vendor_init, which may relabel to metadata_file but not from the fresh
+# mount's tmpfs label. Without this rule the restorecon is denied and /metadata keeps the label
+# "tmpfs" until init.rc's own "restorecon_recursive /metadata" at post-fs (everything still
+# works, there is just one more denial per boot).
+allow vendor_init tmpfs:dir relabelfrom;
