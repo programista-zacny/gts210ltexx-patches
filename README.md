@@ -20,6 +20,7 @@ tablet.
 - Bluetooth, including A2DP audio.
 - Camera: photos, and video recording (fixed in build 10 by kernel patch 0025, OFD locks).
 - Sensors.
+- Fingerprint reader (enrolment and unlock).
 - Deep sleep: about 1% battery drain overnight.
 - App freezer (cgroup v1 freezer with binder freeze support) and cpusets (top-app and
   foreground on all eight cores, background and restricted on the four little cores).
@@ -40,7 +41,6 @@ tablet.
 ### Not working, or not tested
 
 - LTE, SMS, calls: not built. This is a Wi-Fi only build; there is no RIL.
-- Fingerprint: untested.
 - Hardware video decoding: not in build 10. The Exynos OMX core looks for its components in
   `/vendor/lib/omx/`, but they are installed to `/system/lib/omx/`, so every video is decoded in
   software. A fix (AVC and MPEG4 decoders) is prepared for the next build; HEVC, VP8 and the
