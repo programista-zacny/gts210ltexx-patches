@@ -64,7 +64,12 @@ PRODUCT_PACKAGES += \
 # Dalvik heap: this is a 3 GB RAM device. gts2-common inherits the 4096 MB profile
 # through optional ("?=") assignments; these plain assignments override it with the
 # tighter values of phone-xhdpi-2048-dalvik-heap.mk.
+# heapsize 384m instead of 512m: the kernel has no userfaultfd, so ART runs the CC
+# collector, which reserves twice the maximum heap in virtual address space. In a
+# 32-bit process (3 GB of addresses) a largeHeap app with 512m reserved 1 GB and Prime
+# Video aborted with EGL_BAD_ALLOC at playback start (2026-11-08); with 384m it plays.
 PRODUCT_VENDOR_PROPERTIES += \
+    dalvik.vm.heapsize=384m \
     dalvik.vm.heaptargetutilization=0.75 \
     dalvik.vm.heapminfree=512k \
     dalvik.vm.heapmaxfree=8m
