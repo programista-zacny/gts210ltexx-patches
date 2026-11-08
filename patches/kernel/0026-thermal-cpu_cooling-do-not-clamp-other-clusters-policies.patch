@@ -1,0 +1,60 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] thermal: cpu_cooling: do not clamp other clusters' policies
+
+cpufreq_apply_cooling() sets the global notify_device to one cooling
+device and calls cpufreq_update_policy() for its CPUs. While it is set,
+cpufreq_thermal_notifier() runs for every policy that passes
+CPUFREQ_ADJUST, not only those of that cooling device. For a policy whose
+CPU is not in notify_device->allowed_cpus, max_freq stayed 0 and the
+notifier called cpufreq_verify_within_limits(policy, 0, 0). The final
+->verify then raised max to cpuinfo.min_freq and pulled min down to it.
+
+Observed on the SM-T815 (build 11, 2026-11-08): on a hot first boot the
+big-cluster cooling device (thermal-cpufreq-1) re-applied while the power
+HAL wrote cpu0's scaling_min_freq; the little cluster ended at
+min = max = 400 MHz and stayed there (its own cooling device never
+changes state below 95 C, so nothing re-applied user_policy), and every
+later boost write failed with EINVAL. In the same window the HMP
+frequency-invariance callback saw policy->max 0 and cpufreq_calc_scale()
+divided by zero ("Division by zero in kernel", 8 times).
+
+Reproduced without a reboot by toggling
+/sys/class/thermal/cooling_device1/cur_state 0/1 while writing cpu0's
+scaling_min_freq: min = max = 400000 and 192 division-by-zero
+warnings. Logs: logs/cpufreq-400-20261108/.
+
+Leave policies of other CPUs alone, as later mainline kernels do. Also
+make cpufreq_calc_scale() return full scale instead of dividing by a
+zero extent, so a bad limit cannot trap the scheduler again.
+---
+diff --git a/drivers/thermal/cpu_cooling.c b/drivers/thermal/cpu_cooling.c
+index 389e607c..27ae7e48 100644
+--- a/drivers/thermal/cpu_cooling.c
++++ b/drivers/thermal/cpu_cooling.c
+@@ -322,6 +322,8 @@ static int cpufreq_thermal_notifier(struct notifier_block *nb,
+ 
+ 	if (cpumask_test_cpu(policy->cpu, &notify_device->allowed_cpus))
+ 		max_freq = notify_device->cpufreq_val;
++	else
++		return 0;
+ 
+ 	/* Never exceed user_policy.max */
+ 	if (max_freq > policy->user_policy.max)
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index d3690dcf..33fb9437 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -8332,7 +8332,12 @@ __init void init_sched_fair_class(void)
+ #ifdef CONFIG_HMP_FREQUENCY_INVARIANT_SCALE
+ static u32 cpufreq_calc_scale(u32 min, u32 max, u32 curr)
+ {
+-	u32 result = curr / max;
++	u32 result;
++
++	/* An extent of 0 would be a policy clamped to nothing; keep full scale. */
++	if (unlikely(!max))
++		return 1024;
++	result = curr / max;
+ 	return result;
+ }
+ 
