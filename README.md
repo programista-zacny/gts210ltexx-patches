@@ -9,7 +9,7 @@ scripts. It does not contain Samsung's proprietary files (they are in
 [proprietary_vendor_samsung_gts210ltexx](https://github.com/programista-zacny/proprietary_vendor_samsung_gts210ltexx))
 or any APK (they are downloaded and verified by `scripts/fetch-prebuilts.sh`).
 
-The state of this branch is **build 10** (2026-11-08), the build that was tested on the owner's
+The state of this branch is **build 12** (2026-11-08), the build that was tested on the owner's
 tablet.
 
 ## Status
@@ -24,30 +24,33 @@ tablet.
 - Deep sleep: about 1% battery drain overnight.
 - App freezer (cgroup v1 freezer with binder freeze support) and cpusets (top-app and
   foreground on all eight cores, background and restricted on the four little cores).
-- microG Services 0.3.16, F-Droid, Aurora Store (login through microG works).
-- Widevine L3 playback: Prime Video plays in SD. With build 10's default heap size
-  (`dalvik.vm.heapsize=512m`) Prime Video aborts at playback start with `EGL_BAD_ALLOC`; with
-  `dalvik.vm.heapsize=384m` it plays. The 384m setting is not part of build 10 and will come
-  with a later build. See "Known limitations" for the cause.
+- microG Services 0.3.16.1, F-Droid, Aurora Store (an existing login through microG keeps
+  working; see the microG note under "Build").
+- Hardware video decoding: H.264/AVC, HEVC, VP8 and MPEG-4 (since build 11). YouTube plays
+  1080p through the hardware AVC decoder. The Exynos 5433 has no VP9 hardware.
+- Widevine L3 playback: Prime Video and HBO Max play in SD. Since build 11 the ART heap is
+  capped at 384m; with the default 512m Prime Video aborted at playback start (see "Known
+  limitations").
 - SELinux enforcing.
 
 ### Not yet verified
 
 - GPS (the GPS daemon starts and uses the motion sensors; a position fix has not been tested).
-- Wired headset and microphone.
+- Wired headset and microphone (the owner has no 3.5 mm headset).
 - Wi-Fi hotspot.
 - Lineage Recovery on this device.
 
 ### Not working, or not tested
 
 - LTE, SMS, calls: not built. This is a Wi-Fi only build; there is no RIL.
-- Hardware video decoding: not in build 10. The Exynos OMX core looks for its components in
-  `/vendor/lib/omx/`, but they are installed to `/system/lib/omx/`, so every video is decoded in
-  software. A fix (AVC and MPEG4 decoders) is prepared for the next build; HEVC, VP8 and the
-  encoders need a small `libion_exynos` shim first.
-- Widevine L1 (HD playback): the L1 CDM initialises and provisions, but apps fall back to L3
-  because no secure decoder is visible (same cause as above). Even with L1, Netflix is expected
-  to stay at SD (the Tab S2 was never Netflix-certified).
+- Widevine L1 (HD playback). The L1 CDM initialises and provisions, and the secure AVC decoder
+  opens the secure MFC node, but decryption into it fails ("Invalid secure handle" in
+  Samsung's liboemcrypto: the OMX component has no native-handle secure buffers). The HEVC IP
+  has no secure path at all, and Prime Video serves HD as HEVC. The secure decoder is hidden
+  from apps. Prime Video still opens an L1 session first and falls back by itself; once in a
+  while playback needs a second tap. Even with L1, Netflix would stay at SD (the Tab S2 was
+  never Netflix-certified).
+- Hardware video encoders: not enabled yet (camera recording uses the software encoder).
 
 ## Known limitations
 
@@ -143,12 +146,13 @@ cd gts210ltexx
    scripts/fetch-prebuilts.sh
    ```
 
-   Downloads Aurora Store 4.8.4 from F-Droid and microG GmsCore 0.3.16.252432 from microG's
+   Downloads Aurora Store 4.8.4 from F-Droid and microG GmsCore 0.3.16.1.252432 from microG's
    GitHub releases, checks their sha256 and, with the apksigner from the synced tree, their
-   signer certificates. GmsCore 0.3.16 replaces the 0.3.17 that `vendor/partner_gms` pins,
-   because Aurora Store's login through microG hangs in 0.3.17
-   ([microg/GmsCore#3853](https://github.com/microg/GmsCore/issues/3853)); see
-   `tree-overrides/README`.
+   signer certificates. GmsCore 0.3.16.1 (0.3.16 with the security fixes of 2026-09-29) replaces
+   the 0.3.17 that `vendor/partner_gms` pins. Note: Aurora Store's first login through microG
+   can hang in both 0.3.17 and 0.3.16.1
+   ([microg/GmsCore#3853](https://github.com/microg/GmsCore/issues/3853), fixed upstream but not
+   released yet); an existing login keeps working. See `tree-overrides/README`.
 
 7. **Prepare the tree.**
 
@@ -198,8 +202,9 @@ Moving between test-key and own-key builds needs a data wipe.
 ### Pinned manifest
 
 `manifests/build10-pinned.xml` records the exact revision of every project in the tree that
-produced build 10, for reproducibility and for GPL source correspondence (the kernel source of
-build 10 is rINanDO's kernel fork at the recorded revision plus `patches/kernel/` and
+produced build 10; builds 11 and 12 used the same sources (only this repository changed). It is
+for reproducibility and for GPL source correspondence (the kernel source of a build is
+rINanDO's kernel fork at the recorded revision plus `patches/kernel/` and
 `kernel/lineage_gts210ltexx_defconfig`). For the 28 projects that rINanDO's `apply.sh` patches,
 it records the upstream commit the series is applied to. It already contains the local
 manifests, so after step 1 clone rINanDO's patches as in step 2 but do not copy the local
@@ -265,6 +270,7 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 | 0023 | modem_v1: arm the CP-to-AP interrupts for wake-up only while CP runs |
 | 0024 | pidfd: add pidfd_open(), pidfd_send_signal(), exit polling and waitid(P_PIDFD) |
 | 0025 | locks: add open file description locks (F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW) |
+| 0026 | thermal: cpu_cooling: do not clamp other clusters' policies (little cluster stuck at 400 MHz) |
 
 ### Android patches
 
@@ -284,6 +290,9 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 | | 0007 init: keep persistent logcat to /data off by default |
 | | 0008 init: do not make the cpuctl tasks files world-writable |
 | | 0009 powerhint: keep the GPU at or below 550MHz at all times |
+| | 0010 media_codecs: add the HEVC decoder, hide the secure AVC decoder |
+| `hardware_samsung_slsi_openmax` (hardware/samsung_slsi/openmax) | 0001 install the HEVC and VP8 decoders to vendor |
+| `vendor_samsung` (vendor/samsung) | 0001 gts2-common: build the OMX resource manager from source |
 
 ## Deliberately not included
 
