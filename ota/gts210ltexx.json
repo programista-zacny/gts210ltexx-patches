@@ -1,0 +1,17 @@
+[
+  {
+    "datetime": 1794263420,
+    "files": [
+      {
+        "filename": "lineage-24.0-20261109-UNOFFICIAL-gts210ltexx.zip",
+        "sha256": "63782b597a1a67056a9e8d4ffbb32978d398c752d10c4ea99576b9cdda339516",
+        "size": 937779224,
+        "url": "https://github.com/programista-zacny/gts210ltexx-patches/releases/download/build17/lineage-24.0-20261109-UNOFFICIAL-gts210ltexx.zip",
+        "os_patch_level": "2026-11-01",
+        "os_sdk_level": 37
+      }
+    ],
+    "type": "UNOFFICIAL",
+    "version": "24.0"
+  }
+]
