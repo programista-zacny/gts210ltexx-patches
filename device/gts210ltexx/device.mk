@@ -63,12 +63,23 @@ DEVICE_PACKAGE_OVERLAYS += \
 PRODUCT_COPY_FILES += \
     device/samsung/gts210ltexx/rootdir/etc/init.gts210ltexx.rc:$(TARGET_COPY_OUT_VENDOR)/etc/init/init.gts210ltexx.rc
 
+# Recovery USB (adb, sideload): select the legacy android_usb gadget, see the file. Recovery
+# ramdisk only.
+PRODUCT_COPY_FILES += \
+    device/samsung/gts210ltexx/rootdir/etc/init.recovery.universal5433.rc:$(TARGET_COPY_OUT_RECOVERY)/root/init.recovery.universal5433.rc
+
 # Vibrator: unlike the Wi-Fi model, the T815 has an ISA1000A motor (timed_output
 # "vibrator" with enable + intensity nodes); use the generic Samsung AIDL service.
 PRODUCT_PACKAGES += \
     android.hardware.vibrator-service.samsung
 
-# Bring-up builds only (scripts/build.sh exports WITH_ADB_INSECURE): start adbd as root from
+# OTA updates: the LineageOS Updater reads its server URL from this property. The JSON is kept in
+# the public repository, served by GitHub Pages (a property value may not exceed 91 bytes, the
+# raw.githubusercontent.com URL does), and points at GitHub Releases; scripts/release.sh writes both.
+PRODUCT_SYSTEM_PROPERTIES += \
+    lineage.updater.uri=https://programista-zacny.github.io/gts210ltexx-patches/ota/gts210ltexx.json
+
+# Bring-up builds only (WITH_ADB_INSECURE=true for scripts/build.sh): start adbd as root from
 # its first start. "adb root" cannot be used on a fresh install: LineageOS refuses it until
 # "Rooted debugging" is switched on in Developer options, which needs a working UI, and adbd
 # restarts itself even when it refuses. A root adbd reads dmesg and /proc/last_kmsg directly,

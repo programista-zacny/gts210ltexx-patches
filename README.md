@@ -9,7 +9,7 @@ scripts. It does not contain Samsung's proprietary files (they are in
 [proprietary_vendor_samsung_gts210ltexx](https://github.com/programista-zacny/proprietary_vendor_samsung_gts210ltexx))
 or any APK (they are downloaded and verified by `scripts/fetch-prebuilts.sh`).
 
-The state of this branch is **build 13** (2026-11-09), the build that was tested on the owner's
+The state of this branch is **build 17** (2026-11-09), the build that was tested on the owner's
 tablet.
 
 ## Status
@@ -28,6 +28,10 @@ tablet.
   working; see the microG note under "Build").
 - Hardware video decoding: H.264/AVC, HEVC, VP8 and MPEG-4 (since build 11). YouTube plays
   1080p through the hardware AVC decoder. The Exynos 5433 has no VP9 hardware.
+- Lineage Recovery with USB: adb and ADB sideload (since build 17; the 3.10 kernel only has the
+  legacy android_usb gadget, see `device/gts210ltexx/rootdir/etc/init.recovery.universal5433.rc`).
+- OTA updates through the LineageOS Updater (Settings > System > Updater), served from this
+  repository's GitHub Releases (since build 17).
 - Hardware composer overlays (GSC) without leaking memory (since build 13). Before, every
   video-overlay session leaked three full-screen buffers (about 38 MB); after hours of video the
   tablet ran out of RAM and the launcher crashed. Verified over 20 h with 36 video sessions.
@@ -41,7 +45,6 @@ tablet.
 - GPS (the GPS daemon starts and uses the motion sensors; a position fix has not been tested).
 - Wired headset and microphone (the owner has no 3.5 mm headset).
 - Wi-Fi hotspot.
-- Lineage Recovery on this device.
 
 ### Not working, or not tested
 
@@ -69,8 +72,11 @@ tablet.
   at or below 550 MHz was never worse for scrolling and animations and was better wherever the
   power HAL had held a 600 MHz minimum. The 600/700 MHz steps would mainly help games, which are
   not a goal of this build (gts2-common patch 0009).
-- Bring-up builds are `userdebug` with adb open and root without authorization
-  (`WITH_ADB_INSECURE=true`, see "Build"). Build with `WITH_ADB_INSECURE=` for daily use.
+- Builds are `userdebug` with adb secured, as official LineageOS: the computer must be
+  authorized on the tablet. Unlike official builds `ro.debuggable` stays 1, so "Rooted debugging"
+  (off by default) is available in Developer options for diagnosis (patches/vendor_lineage/0001,
+  `LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG`). `WITH_ADB_INSECURE=true` builds open root adb without
+  authorization for bring-up only and must never be published.
 - Builds are signed with the public LineageOS test keys unless you build with your own keys
   (see "Own signing keys").
 
@@ -176,8 +182,11 @@ cd gts210ltexx
    ```
 
    The result is `lineage/out/target/product/gts210ltexx/lineage-24.0-<date>-UNOFFICIAL-gts210ltexx.zip`.
-   For a daily-use build without open adb:
-   `scripts/docker-run.sh env WITH_ADB_INSECURE= scripts/build.sh`.
+   For a bring-up build with open root adb (never publish it):
+   `scripts/docker-run.sh env WITH_ADB_INSECURE=true scripts/build.sh`.
+   Soong's analysis after a makefile change needs more memory than 30 GB of RAM;
+   `scripts/swap-on.sh` adds a 16 GB swap file in its own btrfs subvolume (snapshots of `/`
+   would make a swap file next to them unusable).
    `BUILD_JOBS=N` changes the number of jobs (default 12).
 
 `scripts/device-check.sh` is a read-only health check of a flashed tablet over adb (services,
@@ -224,12 +233,26 @@ Then continue with step 4, with rINanDO's patches at the revision build 10 used:
 
 ## Flashing
 
-- Use TWRP 3.7.0 or Lineage Recovery (the `recovery.img` built with the ROM).
+- Recommended recovery: Lineage Recovery, the `recovery.img` from the same release (flash it once
+  with Heimdall/Odin, or with `dd` to `/dev/block/by-name/RECOVERY` from a rooted shell). It
+  installs Updater OTAs. TWRP 3.7.0 can sideload too, but cannot read Android 17's encrypted /data.
 - Coming from another ROM, or from a build signed with other keys: clean flash. Back up first,
   then format data in recovery.
-- Install with ADB sideload: in recovery choose "Apply update" / "ADB Sideload", then
+- Install with ADB sideload: in Lineage Recovery "Apply update" > "Apply from ADB" (TWRP:
+  "Advanced" > "ADB Sideload"), then
   `adb sideload lineage-24.0-<date>-UNOFFICIAL-gts210ltexx.zip`.
-- Updating between builds with the same keys does not need a wipe.
+- Updating between builds with the same keys does not need a wipe. After the first install,
+  later builds arrive through Settings > System > Updater.
+
+## Releases and OTA
+
+Images are published as GitHub Releases of this repository. `ota/gts210ltexx.json` (served by
+GitHub Pages at the URL in `lineage.updater.uri`, see `device/gts210ltexx/device.mk`) points the
+Updater at the newest one. `scripts/release.sh <tag>` checks a build (adb secured, own keys,
+package name and date) and prints what it would publish; `--publish` creates the release,
+writes the JSON, commits and pushes it. `scripts/check-updates.sh` reports what changed
+upstream (LineageOS manifest and AOSP tag, every branch project, rINanDO's patches, microG and
+Aurora releases) since the tree was synced.
 
 ## What is in this repository
 
@@ -297,6 +320,7 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 | `hardware_samsung_slsi_openmax` (hardware/samsung_slsi/openmax) | 0001 install the HEVC and VP8 decoders to vendor |
 | `vendor_samsung` (vendor/samsung) | 0001 gts2-common: build the OMX resource manager from source |
 | `hardware_samsung_slsi_exynos` (hardware/samsung_slsi/exynos) | 0001 libhwcutils: start the MPP buffer-free thread (display buffer leak) |
+| `vendor_lineage` (vendor/lineage) | 0001 config: allow keeping ro.debuggable in userdebug with secured adb |
 
 ## Deliberately not included
 

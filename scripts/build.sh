@@ -10,16 +10,21 @@ L=${LINEAGE_ROOT:-$W/lineage}
 "$W/scripts/prepare-tree.sh" || exit 1
 cd "$L" || exit 1
 export WITH_GMS="${WITH_GMS:-true}"      # microG + F-Droid from vendor/partner_gms
-# Bring-up builds: adb without authorization and with root (ro.adb.secure=0, ro.debuggable=1),
-# so logs can be read even when boot hangs before the UI. Set WITH_ADB_INSECURE= (empty) for a
-# build meant for daily use.
-export WITH_ADB_INSECURE="${WITH_ADB_INSECURE-true}"
+# adb is secured by default, as in official LineageOS (userdebug): authorize the computer once
+# on the tablet, then "Rooted debugging" in Developer options gives `adb root`. For a bring-up
+# build whose boot may hang before the UI, pass WITH_ADB_INSECURE=true: adb then works without
+# authorization and as root from the first start. Never publish such a build.
+export WITH_ADB_INSECURE="${WITH_ADB_INSECURE-}"
 [ -n "$WITH_ADB_INSECURE" ] || unset WITH_ADB_INSECURE
+# Keep ro.debuggable=1 (userdebug) with secured adb, so "Rooted debugging" stays available for
+# diagnosis; LineageOS would set ro.debuggable=0 (patches/vendor_lineage/0001 adds this switch).
+# Pass LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG= (empty) for the official behaviour.
+export LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG="${LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG-true}"
 
 # --- own signing keys: opt-in with OWN_KEYS=1 (see "Own signing keys" in README.md) -----------
 # With OWN_KEYS=1 prepare-tree.sh (above) has installed keys/ as vendor/lineage-priv/keys and the
 # build signs with them (ro.build.tags=release-keys) instead of the public test keys. Meant for
-# the final daily-use build, together with WITH_ADB_INSECURE= (empty). Without OWN_KEYS this
+# the published builds (adb secured by default, see above). Without OWN_KEYS this
 # block does nothing.
 if [ "${OWN_KEYS:-}" = 1 ]; then
     if [ ! -f vendor/lineage-priv/keys/keys.mk ]; then
@@ -29,7 +34,7 @@ if [ "${OWN_KEYS:-}" = 1 ]; then
     echo "OWN_KEYS=1: signing with own keys from vendor/lineage-priv/keys"
     if [ -n "${WITH_ADB_INSECURE:-}" ]; then
         echo "WARNING: OWN_KEYS=1 with WITH_ADB_INSECURE=$WITH_ADB_INSECURE: adb stays open without authorization." >&2
-        echo "         For the daily-use build pass WITH_ADB_INSECURE= (empty)." >&2
+        echo "         Do not publish this build." >&2
     fi
 fi
 # --- end of own signing keys --------------------------------------------------------------------

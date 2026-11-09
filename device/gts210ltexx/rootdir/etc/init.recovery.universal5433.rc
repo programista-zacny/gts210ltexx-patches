@@ -1,0 +1,26 @@
+# Lineage Recovery only: drive USB (adb, sideload) through the legacy android_usb gadget.
+# Installed to the root of the recovery ramdisk (device.mk), where the recovery init.rc imports
+# it as /init.recovery.${ro.hardware}.rc; the normal boot never reads it.
+#
+# Without this file USB never comes up in recovery (build 13: the host saw the disconnect and no
+# device after it). This init sets sys.usb.configfs=1 in recovery and charger mode as soon as
+# /sys/class/udc lists a controller (system/core/init/init.cpp, SetUsbController: "Recovery and
+# Charger mode always uses configfs=1"). The kernel has one (sys.usb.controller=15a00000.dwc3)
+# but no configfs gadget: CONFIG_USB_CONFIGFS is not set, CONFIG_USB_G_ANDROID=y provides
+# /sys/class/android_usb/android0 with adbd's functionfs as the "adb" alias of f_ffs, the way the
+# normal boot uses it (gts2-common init.universal5433.usb.rc). So the recovery init.rc's configfs
+# actions ran: they write to a /config/usb_gadget/g1 that does not exist, and none of the
+# android_usb actions (all conditioned on sys.usb.configfs=0) ran, so android0 was never enabled.
+#
+# Setting the property back to 0 selects the init.rc's android_usb actions, which already fit
+# this kernel: "on fs && sys.usb.configfs=0" writes f_ffs/aliases (adb,fastboot), idVendor and
+# the strings; "sys.usb.config=adb|sideload && sys.usb.configfs=0" writes idProduct, functions
+# adb and enable 1; "sys.usb.config=none && ..." writes enable 0. IDs: ro.recovery.usb.vid and
+# ro.recovery.usb.adb.pid (18D1:D001, AOSP's defaults); the host's udev matches the adb
+# interface class (ff/42/01), not the IDs.
+#
+# init has set the property before it parses any .rc file. Property triggers are enabled only
+# after early-init, so no "sys.usb.configfs=1" action sees the old value.
+
+on early-init
+    setprop sys.usb.configfs 0
