@@ -1,0 +1,146 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] libhwcutils: start the MPP buffer-free thread
+
+ExynosMPP (the v1 implementation this board builds, BOARD_USES_VPP unset)
+created its BufferFreeThread but never called run(). Every GSC M2M
+session allocates NUM_GSC_DST_BUFS (3) full-panel destination buffers;
+when the session ends or reconfigures they are queued on mFreedBuffers,
+which only that thread drains, so they were never freed: about 38 MB per
+video-overlay session on the 2048x1536 panel. Once 61 such buffers had
+filled the GSC's IOVA space, every frame failed and queued three more.
+
+Observed on the SM-T815 on 2026-11-09: after 8.7 h, 153 buffers of
+12603392 bytes (1.8 GB) held by the composer, RAM exhausted, launcher
+ANR/crash loop and flicker. Reproduced on demand: with HW overlays on,
+five Home/return cycles around a YouTube video left exactly 15 orphaned
+buffers. Hardware video decoding made it frequent (NV12M decoder output
+always goes through the GSC), but the bug dates from the HWC import.
+Evidence: logs/ion-leak-20261109/.
+
+Start the thread as ExynosMPPv2 does, and make it safe to live with:
+- hold it in an sp<> (a started Thread is refcounted) and wake it before
+  requestExitAndWait() in the destructor;
+- let threadLoop() handle one batch per call and also wake every 500 ms,
+  since not every queueing site signals the condition;
+- take the whole list under the lock in freeBuffers(), so the thread and
+  an inline caller can never free the same handle twice;
+- safety net: reallocateBuffers() frees the backlog inline if more than
+  two sets of buffers are pending.
+---
+diff --git a/libhwcutils/ExynosMPP.cpp b/libhwcutils/ExynosMPP.cpp
+index c82b354..33d7b49 100644
+--- a/libhwcutils/ExynosMPP.cpp
++++ b/libhwcutils/ExynosMPP.cpp
+@@ -54,14 +54,21 @@ ExynosMPP::ExynosMPP(ExynosDisplay *display, int gscIndex)
+     mDoubleOperation = false;
+     mBufferFreeThread = new BufferFreeThread(this);
+     mBufferFreeThread->mRunning = true;
++    /* The thread drains mFreedBuffers; without run() every GSC M2M session leaked its
++     * NUM_GSC_DST_BUFS full-screen destination buffers (ExynosMPPv2 starts it too). */
++    mBufferFreeThread->run("MPPThread");
+ }
+ 
+ ExynosMPP::~ExynosMPP()
+ {
+     if (mBufferFreeThread != NULL) {
+-        mBufferFreeThread->mRunning = false;
++        {
++            android::Mutex::Autolock lock(mMutex);
++            mBufferFreeThread->mRunning = false;
++            mBufferFreeThread->mCondition.signal();
++        }
+         mBufferFreeThread->requestExitAndWait();
+-        delete mBufferFreeThread;
++        mBufferFreeThread.clear();
+     }
+ }
+ 
+@@ -679,6 +686,19 @@ int ExynosMPP::reallocateBuffers(private_handle_t *src_handle, exynos_mpp_img &d
+     alloc_device_t* alloc_device = mDisplay->mAllocDevice;
+     int ret = 0;
+     int dst_stride;
++
++    /* Safety net: never let the deferred-free backlog grow, even if the thread stalls */
++    {
++        size_t pending;
++        {
++            android::Mutex::Autolock lock(mMutex);
++            pending = mFreedBuffers.size();
++        }
++        if (pending > 2 * NUM_GSC_DST_BUFS) {
++            ALOGW("MPP%u: %zu deferred buffers pending, freeing them now", mIndex, pending);
++            freeBuffers();
++        }
++    }
+     int usage = GRALLOC_USAGE_SW_READ_NEVER |
+             GRALLOC_USAGE_SW_WRITE_NEVER |
+             GRALLOC_USAGE_NOZEROED |
+@@ -1443,36 +1463,33 @@ bool ExynosMPP::inUse()
+ 
+ void ExynosMPP::freeBuffers()
+ {
+-    alloc_device_t* alloc_device = mDisplay->mAllocDevice;
+-    android::List<buffer_handle_t >::iterator it;
+-    android::List<buffer_handle_t >::iterator end;
++    android::List<buffer_handle_t> local;
+     {
++        /* take the whole list under the lock, so concurrent callers never double-free */
+         android::Mutex::Autolock lock(mMutex);
+-        it = mFreedBuffers.begin();
+-        end = mFreedBuffers.end();
+-    }
+-    while (it != end) {
+-        buffer_handle_t buffer = (buffer_handle_t)(*it);
+-        alloc_device->free(alloc_device, buffer);
+-        {
+-            android::Mutex::Autolock lock(mMutex);
+-            it = mFreedBuffers.erase(it);
+-        }
++        local = mFreedBuffers;
++        mFreedBuffers.clear();
+     }
++    if (local.empty() || mDisplay == NULL || mDisplay->mAllocDevice == NULL)
++        return;
++    alloc_device_t* alloc_device = mDisplay->mAllocDevice;
++    for (android::List<buffer_handle_t>::iterator it = local.begin(); it != local.end(); ++it)
++        alloc_device->free(alloc_device, *it);
+ }
+ 
+ bool BufferFreeThread::threadLoop()
+ {
+-    while(mRunning) {
+-        {
+-            android::Mutex::Autolock lock(mExynosMPP->mMutex);
+-            while(mExynosMPP->mFreedBuffers.size() == 0) {
+-                mCondition.wait(mExynosMPP->mMutex);
+-            }
+-        }
+-        mExynosMPP->freeBuffers();
++    bool pending;
++    {
++        android::Mutex::Autolock lock(mExynosMPP->mMutex);
++        /* Not every queueing site signals, so also wake up periodically. */
++        if (mRunning && mExynosMPP->mFreedBuffers.size() == 0)
++            mCondition.waitRelative(mExynosMPP->mMutex, 500000000LL);
++        pending = mExynosMPP->mFreedBuffers.size() != 0;
+     }
+-    return true;
++    if (pending)
++        mExynosMPP->freeBuffers();
++    return mRunning;
+ }
+ 
+ bool ExynosMPP::isSrcCropAligned(hwc_layer_1_t &layer, bool rotation)
+diff --git a/libhwcutils/ExynosMPP.h b/libhwcutils/ExynosMPP.h
+index bebdae3..3209521 100644
+--- a/libhwcutils/ExynosMPP.h
++++ b/libhwcutils/ExynosMPP.h
+@@ -102,7 +102,7 @@ class ExynosMPP {
+         int                             mS3DMode;
+         bool                            mDoubleOperation;
+         android::List<buffer_handle_t > mFreedBuffers;
+-        BufferFreeThread                *mBufferFreeThread;
++        android::sp<BufferFreeThread>   mBufferFreeThread;
+         android::Mutex                  mMutex;
+         size_t                          mNumAvailableDstBuffers;
+ 

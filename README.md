@@ -9,7 +9,7 @@ scripts. It does not contain Samsung's proprietary files (they are in
 [proprietary_vendor_samsung_gts210ltexx](https://github.com/programista-zacny/proprietary_vendor_samsung_gts210ltexx))
 or any APK (they are downloaded and verified by `scripts/fetch-prebuilts.sh`).
 
-The state of this branch is **build 12** (2026-11-08), the build that was tested on the owner's
+The state of this branch is **build 13** (2026-11-09), the build that was tested on the owner's
 tablet.
 
 ## Status
@@ -28,6 +28,9 @@ tablet.
   working; see the microG note under "Build").
 - Hardware video decoding: H.264/AVC, HEVC, VP8 and MPEG-4 (since build 11). YouTube plays
   1080p through the hardware AVC decoder. The Exynos 5433 has no VP9 hardware.
+- Hardware composer overlays (GSC) without leaking memory (since build 13). Before, every
+  video-overlay session leaked three full-screen buffers (about 38 MB); after hours of video the
+  tablet ran out of RAM and the launcher crashed. Verified over 20 h with 36 video sessions.
 - Widevine L3 playback: Prime Video and HBO Max play in SD. Since build 11 the ART heap is
   capped at 384m; with the default 512m Prime Video aborted at playback start (see "Known
   limitations").
@@ -293,6 +296,7 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 | | 0010 media_codecs: add the HEVC decoder, hide the secure AVC decoder |
 | `hardware_samsung_slsi_openmax` (hardware/samsung_slsi/openmax) | 0001 install the HEVC and VP8 decoders to vendor |
 | `vendor_samsung` (vendor/samsung) | 0001 gts2-common: build the OMX resource manager from source |
+| `hardware_samsung_slsi_exynos` (hardware/samsung_slsi/exynos) | 0001 libhwcutils: start the MPP buffer-free thread (display buffer leak) |
 
 ## Deliberately not included
 
