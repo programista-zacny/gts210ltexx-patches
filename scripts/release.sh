@@ -92,7 +92,8 @@ Built from branch $BRANCH at $(git -C "$PUB" rev-parse --short HEAD 2>/dev/null 
 - recovery.img (Lineage Recovery): sha256 $rsha
 
 Signed with the maintainer's own keys; installing over a build with other keys needs a clean flash.
-Devices on an earlier build from this page get it through Settings > System > Updater."
+Devices on an earlier build from this page get it through Settings > System > Updater.
+Support and discussion: https://xdaforums.com/t/rom-unofficial-17-sm-t815-lineageos-24-0-for-galaxy-tab-s2-9-7-lte-microg.4809902/"
 
 echo "release tag:   $TAG"
 echo "package:       $ZIP ($size bytes)"

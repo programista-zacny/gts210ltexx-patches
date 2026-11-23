@@ -14,6 +14,11 @@ The state of this branch is **build 22** (2026-11-23), the build that runs on th
 From build 22 on there is only the LTE build; the Wi-Fi-only variant of builds up to 17 is
 discontinued (an LTE build works the same without a SIM card).
 
+## Support and discussion
+
+Questions, bug reports and test results (especially LTE with your carrier): the XDA thread
+https://xdaforums.com/t/rom-unofficial-17-sm-t815-lineageos-24-0-for-galaxy-tab-s2-9-7-lte-microg.4809902/
+
 ## Status
 
 ### Verified on hardware
