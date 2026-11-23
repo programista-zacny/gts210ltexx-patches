@@ -1,0 +1,16 @@
+// LTE build only (installed through PRODUCT_PACKAGES in device.mk's LTE block).
+//
+// /system/bin/gpsd -> /vendor/bin/gpsd. Samsung's libsec-ril.so accepts OEM clients on its
+// @Multiclient socket only from a whitelist (allowedProcess): uid 1021 (gps) with argv[0] exactly
+// "/system/bin/gpsd" (it reads /proc/<peer>/cmdline after SO_PEERCRED and compares with strcmp),
+// the path of the stock Android 7 firmware. Our gpsd is a vendor blob at /vendor/bin/gpsd, so rild
+// closed every connection and gpsd retried every 20 s for ever, holding its GPSD wakelock (build 20:
+// 427 s of 471 s, the tablet never suspended; staging/lte-build20-issues/REPORT.md). Started
+// through this link (lte/init.baseband.rc overrides the gpsd service), gpsd connects as stock did:
+// control-plane A-GNSS and frequency aiding from the modem. The exec still resolves to the vendor
+// binary (gpsd_exec), so the SELinux domain stays u:r:gpsd:s0.
+install_symlink {
+    name: "gpsd_system_bin_symlink",
+    installed_location: "bin/gpsd",
+    symlink_target: "/vendor/bin/gpsd",
+}

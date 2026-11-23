@@ -1,0 +1,90 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] netd: optional rule for directly-connected routes
+
+Port of "netd: Allow devices to force-add directly-connected routes"
+(LineageOS-UL android_system_netd 3f4551ad, a guarded revert of AOSP
+92e8f96e) for the LTE build of the SM-T815: Samsung's legacy RIL sets
+up the IPv4 address of rmnet0 itself, and without a rule that looks up
+the main table (where the kernel put the directly-connected route) the
+default route of the mobile network cannot be added:
+  Error adding route 0.0.0.0/0 -> <gateway> rmnet0 to table 1002:
+  Network is unreachable
+
+LineageOS used the soong defaults needs_netd_direct_connect_rule_defaults
+(TARGET_NEEDS_NETD_DIRECT_CONNECT_RULE), which vendor/lineage no longer
+has; this uses the soong config variable netd.direct_connect_rule,
+which only the LTE build sets. Without it nothing changes.
+---
+diff --git a/server/Android.bp b/server/Android.bp
+index 44dc816..dffc4dc 100644
+--- a/server/Android.bp
++++ b/server/Android.bp
+@@ -42,6 +42,11 @@ cc_library_static {
+         "netd_aidl_interface_lateststable_cpp_shared",
+         "netd_defaults",
+     ],
++    // gts210ltexx: soong config variable netd.direct_connect_rule, see RouteController.cpp.
++    cflags: select(soong_config_variable("netd", "direct_connect_rule"), {
++        true: ["-DNEEDS_NETD_DIRECT_CONNECT_RULE"],
++        default: [],
++    }),
+     include_dirs: [
+         "system/netd/include",
+         "system/netd/server/binder",
+diff --git a/server/RouteController.cpp b/server/RouteController.cpp
+index 2f0e8e2..e607e5e 100644
+--- a/server/RouteController.cpp
++++ b/server/RouteController.cpp
+@@ -774,6 +774,26 @@ int RouteController::configureDummyNetwork() {
+     return 0;
+ }
+ 
++#ifdef NEEDS_NETD_DIRECT_CONNECT_RULE
++// Add a new rule to look up the 'main' table, with the same selectors as the "default network"
++// rule, but with a lower priority. We will never create routes in the main table; it should only be
++// used for directly-connected routes implicitly created by the kernel when adding IP addresses.
++// This is necessary, for example, when adding a route through a directly-connected gateway: in
++// order to add the route, there must already be a directly-connected route that covers the gateway.
++// (Legacy Samsung RILs configure the address of rmnet0 themselves; without this rule the default
++// route of the mobile network fails with "Network is unreachable".)
++[[nodiscard]] static int addDirectlyConnectedRule() {
++    Fwmark fwmark;
++    Fwmark mask;
++
++    fwmark.netId = NETID_UNSET;
++    mask.netId = FWMARK_NET_ID_MASK;
++
++    return modifyIpRule(RTM_NEWRULE, RULE_PRIORITY_DIRECTLY_CONNECTED, RT_TABLE_MAIN,
++                        fwmark.intValue, mask.intValue, IIF_NONE, OIF_NONE, UID_ROOT, UID_ROOT);
++}
++#endif
++
+ // Add an explicit unreachable rule close to the end of the prioriy list to make it clear that
+ // relying on the kernel-default "from all lookup main" rule at priority 32766 is not intended
+ // behaviour. We do flush the kernel-default rules at startup, but having an explicit unreachable
+@@ -1237,6 +1257,11 @@ int RouteController::Init(unsigned localNetId) {
+     if (int ret = addLocalNetworkRules(localNetId)) {
+         return ret;
+     }
++#ifdef NEEDS_NETD_DIRECT_CONNECT_RULE
++    if (int ret = addDirectlyConnectedRule()) {
++        return ret;
++    }
++#endif
+     if (int ret = addUnreachableRule()) {
+         return ret;
+     }
+diff --git a/server/RouteController.h b/server/RouteController.h
+index d8393e7..1d5e1dc 100644
+--- a/server/RouteController.h
++++ b/server/RouteController.h
+@@ -81,6 +81,9 @@ constexpr int32_t RULE_PRIORITY_UID_DEFAULT_NETWORK               = 29000;
+ constexpr int32_t RULE_PRIORITY_UID_DEFAULT_UNREACHABLE           = 30000;
+ constexpr int32_t RULE_PRIORITY_DEFAULT_NETWORK                   = 31000;
+ constexpr int32_t RULE_PRIORITY_UNREACHABLE                       = 32000;
++#ifdef NEEDS_NETD_DIRECT_CONNECT_RULE
++constexpr int32_t RULE_PRIORITY_DIRECTLY_CONNECTED                = 30000;
++#endif
+ // clang-format on
+ 
+ class UidRanges;

@@ -38,7 +38,10 @@ if [ ! -d "$SUBVOL" ]; then
     else
         sudo mkdir -p "$SUBVOL"
     fi
-elif [ "$fstype" = btrfs ] && ! sudo btrfs subvolume show "$SUBVOL" >/dev/null 2>&1; then
+elif [ "$fstype" = btrfs ] && [ "$(stat -c %i "$SUBVOL")" != 256 ]; then
+    # The root directory of every btrfs subvolume has inode number 256. This test needs no
+    # sudo; "sudo btrfs subvolume show" failed whenever sudo could not ask for the password
+    # (no terminal), which was misreported as "not a subvolume".
     echo "$SUBVOL exists but is not a btrfs subvolume: snapshots of / would break a swap file in it" >&2
     exit 1
 fi

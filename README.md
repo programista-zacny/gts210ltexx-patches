@@ -1,16 +1,18 @@
 # LineageOS 24.0 (Android 17) for the SM-T815
 
 Samsung Galaxy Tab S2 9.7 LTE (SM-T815, codename `gts210ltexx`, Exynos 5433, 32-bit ARM),
-built **Wi-Fi only** (no modem/RIL), with microG, F-Droid and Aurora Store.
+with **LTE mobile data and SMS (experimental, no voice calls)**, microG, F-Droid and Aurora Store.
 
 This repository is an overlay on top of [rINanDO's gts210wifi work](https://github.com/rINanDO/gts210wifi-patches):
 the T815 device tree, a set of kernel and Android patches, the kernel defconfig and the build
 scripts. It does not contain Samsung's proprietary files (they are in
 [proprietary_vendor_samsung_gts210ltexx](https://github.com/programista-zacny/proprietary_vendor_samsung_gts210ltexx))
-or any APK (they are downloaded and verified by `scripts/fetch-prebuilts.sh`).
+or any APK (they are downloaded and verified at build time), and not the stock modem files of
+the LTE build (you extract them from Samsung's firmware, see "Build").
 
-The state of this branch is **build 17** (2026-11-09), the build that was tested on the owner's
-tablet.
+The state of this branch is **build 22** (2026-11-23), the build that runs on the owner's tablet.
+From build 22 on there is only the LTE build; the Wi-Fi-only variant of builds up to 17 is
+discontinued (an LTE build works the same without a SIM card).
 
 ## Status
 
@@ -24,8 +26,18 @@ tablet.
 - Deep sleep: about 1% battery drain overnight.
 - App freezer (cgroup v1 freezer with binder freeze support) and cpusets (top-app and
   foreground on all eight cores, background and restricted on the four little cores).
-- microG Services 0.3.16.1, F-Droid, Aurora Store (an existing login through microG keeps
-  working; see the microG note under "Build").
+- microG Services 0.3.18 (with the fix for Aurora Store's first login,
+  [microg/GmsCore#3853](https://github.com/microg/GmsCore/issues/3853)), F-Droid (updates itself
+  to 2.x through the privileged extension), Aurora Store.
+- Android System WebView 157.
+- LTE modem without a SIM card (builds 20-22): Samsung's stock CP boot daemon and RIL bring the
+  Shannon 333 modem up (ONLINE in about 15 s), the framework sees the baseband and reports
+  "no SIM", and the modem does not keep the tablet awake (over two days: 94% deep sleep).
+- Wi-Fi reconnects with the screen off (since build 22). Before, Wi-Fi stayed down after a
+  screen-off disconnect until the screen was turned on, so push notifications did not arrive:
+  the Wi-Fi service never got preferred-network offload (PNO). Now the firmware scans in the
+  background; checked on the tablet (overlay active, driver advertises scheduled scan), in
+  daily use since build 22.
 - Hardware video decoding: H.264/AVC, HEVC, VP8 and MPEG-4 (since build 11). YouTube plays
   1080p through the hardware AVC decoder. The Exynos 5433 has no VP9 hardware.
 - Lineage Recovery with USB: adb and ADB sideload (since build 17; the 3.10 kernel only has the
@@ -42,20 +54,24 @@ tablet.
 
 ### Not yet verified
 
-- GPS (the GPS daemon starts and uses the motion sensors; a position fix has not been tested).
+- **LTE with a SIM card: mobile data and SMS have not been tested yet.** The stack is in place
+  (stock libsec-ril, rINanDO's Samsung libril, the LineageOS IRadio 1.4 wrapper, a netd rule for
+  the default route over rmnet). Expect problems; reports are welcome. IPv6-only APNs may need
+  the APN protocol set to IPv4/IPv6 (no BPF, so no CLAT offload).
+- GPS position fix (the GPS daemon starts and gets modem assistance; a fix outdoors has not
+  been tested).
 - Wired headset and microphone (the owner has no 3.5 mm headset).
 - Wi-Fi hotspot.
 
 ### Not working, or not tested
 
-- LTE, SMS, calls: not built. This is a Wi-Fi only build; there is no RIL.
-- Widevine L1 (HD playback). The L1 CDM initialises and provisions, and the secure AVC decoder
-  opens the secure MFC node, but decryption into it fails ("Invalid secure handle" in
-  Samsung's liboemcrypto: the OMX component has no native-handle secure buffers). The HEVC IP
-  has no secure path at all, and Prime Video serves HD as HEVC. The secure decoder is hidden
-  from apps. Prime Video still opens an L1 session first and falls back by itself; once in a
-  while playback needs a second tap. Even with L1, Netflix would stay at SD (the Tab S2 was
-  never Netflix-certified).
+- Voice calls: not built (data and SMS only).
+- Widevine L1 (HD playback): not verified. Since build 18 the AVC decoder is built from source
+  with native-handle secure input buffers (openmax patch 0002), the fix for the "Invalid secure
+  handle" failure in Samsung's liboemcrypto, and the secure AVC decoder is listed again; an
+  app that asks for L1 with H.264 has not been tried yet. The HEVC IP has no secure path at all
+  and Prime Video serves HD as HEVC, so Prime Video plays L3 (SD). Netflix stays at SD in any
+  case (the Tab S2 was never Netflix-certified).
 - Hardware video encoders: not enabled yet (camera recording uses the software encoder).
 
 ## Known limitations
@@ -121,8 +137,8 @@ cd gts210ltexx
    repo sync -c -j8 --force-sync
    ```
 
-   To get exactly the sources of build 10 instead of the current branch heads, use
-   `manifests/build10-pinned.xml` (see "Pinned manifest").
+   To get exactly the sources of build 22 instead of the current branch heads, use
+   `manifests/build22-pinned.xml` (see "Pinned manifest").
 
 4. **Apply rINanDO's patch series** (28 repositories, applied with `git am`).
 
@@ -149,19 +165,28 @@ cd gts210ltexx
    another; a plain copy avoids that. Set `VENDOR_BLOBS=/some/other/path` to keep the blobs
    elsewhere.
 
-6. **Download the prebuilt APKs.**
+6. **Download the prebuilt APK.**
 
    ```bash
    scripts/fetch-prebuilts.sh
    ```
 
-   Downloads Aurora Store 4.8.4 from F-Droid and microG GmsCore 0.3.16.1.252432 from microG's
-   GitHub releases, checks their sha256 and, with the apksigner from the synced tree, their
-   signer certificates. GmsCore 0.3.16.1 (0.3.16 with the security fixes of 2026-09-29) replaces
-   the 0.3.17 that `vendor/partner_gms` pins. Note: Aurora Store's first login through microG
-   can hang in both 0.3.17 and 0.3.16.1
-   ([microg/GmsCore#3853](https://github.com/microg/GmsCore/issues/3853), fixed upstream but not
-   released yet); an existing login keeps working. See `tree-overrides/README`.
+   Downloads Aurora Store 4.8.4 from F-Droid and checks its sha256 and, with the apksigner from
+   the synced tree, its signer certificate. microG (GmsCore and FakeStore 0.3.18) and F-Droid
+   come from `vendor/partner_gms` (lineageos4microg), whose `vendorsetup.sh` downloads and
+   signature-checks them.
+
+6a. **Extract the stock modem files (LTE build).** The LTE build needs five unmodified files
+   from Samsung's SM-T815 firmware **T815XXU2CRH1** (the firmware whose modem image is in the
+   RADIO partition); they are not published here. Download that firmware from Samsung's update
+   servers (for example with [samloader-rs](https://github.com/topjohnwu/samloader-rs), model
+   SM-T815, a European CSC such as XEO, version
+   `T815XXU2CRH1/T815XEO2CRG1/T815XXU2CRH1/T815XXU2CRH1`), then take `/sbin/cbd` from the boot
+   image's ramdisk and `libsec-ril.so`, `libfloatingfeature.so`, `libsecnativefeature.so` and
+   `libprotobuf-cpp-full.so` from `/system/lib`, and put them at
+   `tree-overrides/vendor/samsung/gts210ltexx-modem/proprietary/vendor/bin/cbd` and
+   `…/proprietary/vendor/lib/`. `tree-overrides/README` lists their sha256. Without them, build
+   with `WITH_LTE=` (empty) for a Wi-Fi-only image.
 
 7. **Prepare the tree.**
 
@@ -187,7 +212,10 @@ cd gts210ltexx
    Soong's analysis after a makefile change needs more memory than 30 GB of RAM;
    `scripts/swap-on.sh` adds a 16 GB swap file in its own btrfs subvolume (snapshots of `/`
    would make a swap file next to them unusable).
-   `BUILD_JOBS=N` changes the number of jobs (default 12).
+   `BUILD_JOBS=N` changes the number of jobs (default 12; the owner's builds use 8).
+   ccache is on (`ccache/` in the project, 50 GB); `USE_CCACHE=` turns it off.
+   Feature switches, all on by default: `WITH_LTE` (modem, RIL, telephony), `WITH_WIFI_PNO`
+   (screen-off Wi-Fi reconnect). Set one to empty to build without it.
 
 `scripts/device-check.sh` is a read-only health check of a flashed tablet over adb (services,
 crashes, SELinux, suspend, cpusets, freezer, kernel features); it writes filtered logs to
@@ -213,8 +241,9 @@ Moving between test-key and own-key builds needs a data wipe.
 
 ### Pinned manifest
 
-`manifests/build10-pinned.xml` records the exact revision of every project in the tree that
-produced build 10; builds 11 and 12 used the same sources (only this repository changed). It is
+`manifests/build22-pinned.xml` records the exact revision of every project in the tree that
+produced build 22 (`manifests/build10-pinned.xml` the one of builds 10-21; between them only
+this repository changed). It is
 for reproducibility and for GPL source correspondence (the kernel source of a build is
 rINanDO's kernel fork at the recorded revision plus `patches/kernel/` and
 `kernel/lineage_gts210ltexx_defconfig`). For the 28 projects that rINanDO's `apply.sh` patches,
@@ -223,12 +252,12 @@ manifests, so after step 1 clone rINanDO's patches as in step 2 but do not copy 
 manifests; instead:
 
 ```bash
-cp ../manifests/build10-pinned.xml .repo/manifests/
-repo init -m build10-pinned.xml
+cp ../manifests/build22-pinned.xml .repo/manifests/
+repo init -m build22-pinned.xml
 repo sync -c -j8 --force-sync
 ```
 
-Then continue with step 4, with rINanDO's patches at the revision build 10 used:
+Then continue with step 4, with rINanDO's patches at the revision builds 10-22 used:
 `git -C patches-rinando checkout cc3b029d2f501c37f2d55643ac373cfacaa67b12`.
 
 ## Flashing
@@ -242,7 +271,12 @@ Then continue with step 4, with rINanDO's patches at the revision build 10 used:
   "Advanced" > "ADB Sideload"), then
   `adb sideload lineage-24.0-<date>-UNOFFICIAL-gts210ltexx.zip`.
 - Updating between builds with the same keys does not need a wipe. After the first install,
-  later builds arrive through Settings > System > Updater.
+  later builds arrive through Settings > System > Updater. Build 17 (Wi-Fi only) updates to the
+  LTE builds without a wipe.
+- The update package does not rewrite the recovery partition (unless "Update recovery" is on in
+  the Updater's settings); flash the release's `recovery.img` by hand when it changes.
+- In Lineage Recovery the touchscreen does not work: use the volume keys to move and the power
+  key to select.
 
 ## Releases and OTA
 
@@ -260,10 +294,14 @@ Aurora releases) since the tree was synced.
 device/gts210ltexx/   T815 device tree (on top of rINanDO's device/samsung/gts2-common)
 kernel/               lineage_gts210ltexx_defconfig
 patches/<name>/       patches for lineage/<TARGET>, applied by scripts/prepare-tree.sh
-manifests/            gts210ltexx-extra.xml (vendor/partner_gms) and build10-pinned.xml
-scripts/              prepare-tree, build, docker-run, fetch-prebuilts, check-own-keys, device-check
+device/gts210ltexx/lte/  LTE build: modem init, SELinux, telephony overlay, radio HAL manifest
+device/gts210ltexx/rro/  Wi-Fi resources overlay (PNO)
+manifests/            gts210ltexx-extra.xml (vendor/partner_gms), build10- and build22-pinned.xml
+scripts/              prepare-tree, build, docker-run, fetch-prebuilts, check-own-keys, device-check,
+                      check-updates, release, swap-on
 docker/Dockerfile     build environment (Ubuntu 22.04)
-tree-overrides/       files copied over lineage/ (only the microG GmsCore APK, fetched)
+tree-overrides/       files copied over lineage/ (the stock modem files of the LTE build, not
+                      published; see its README)
 rinando-fixes/        rebased replacements for rINanDO patch files that no longer apply
 ```
 
@@ -297,6 +335,7 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 | 0024 | pidfd: add pidfd_open(), pidfd_send_signal(), exit polling and waitid(P_PIDFD) |
 | 0025 | locks: add open file description locks (F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW) |
 | 0026 | thermal: cpu_cooling: do not clamp other clusters' policies (little cluster stuck at 400 MHz) |
+| 0027 | bcmdhd4358a3: optional cfg80211 scheduled scan for PNO (`CONFIG_BCMDHD_SCHED_SCAN`) |
 
 ### Android patches
 
@@ -316,8 +355,14 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 | | 0007 init: keep persistent logcat to /data off by default |
 | | 0008 init: do not make the cpuctl tasks files world-writable |
 | | 0009 powerhint: keep the GPU at or below 550MHz at all times |
-| | 0010 media_codecs: add the HEVC decoder, hide the secure AVC decoder |
+| | 0010 media_codecs: add the HEVC decoder |
+| | 0011 wifi: keep wpa_supplicant off the scheduled scan |
 | `hardware_samsung_slsi_openmax` (hardware/samsung_slsi/openmax) | 0001 install the HEVC and VP8 decoders to vendor |
+| | 0002 secure AVC input as native handles, AVC decoder to vendor (Widevine L1) |
+| `hardware_ril` (hardware/ril) | 0001 libril: build the Samsung libril with ril.samsung_libril |
+| `hardware_samsung` (hardware/samsung) | 0001 ril: Samsung ril.h and the libril sources for Soong |
+| `hardware_lineage_interfaces` (hardware/lineage/interfaces) | 0001 radio 1.4 legacy: answer requests the legacy RIL cannot serve |
+| `system_netd` (system/netd) | 0001 netd: optional rule for directly connected routes |
 | `vendor_samsung` (vendor/samsung) | 0001 gts2-common: build the OMX resource manager from source |
 | `hardware_samsung_slsi_exynos` (hardware/samsung_slsi/exynos) | 0001 libhwcutils: start the MPP buffer-free thread (display buffer leak) |
 | `vendor_lineage` (vendor/lineage) | 0001 config: allow keeping ro.debuggable in userdebug with secured adb |
@@ -326,8 +371,8 @@ rinando-fixes/        rebased replacements for rINanDO patch files that no longe
 
 These were analysed, and most were prepared as patches, but are left out of this build:
 
-- **inet_diag / tcp_info:** no observed problem behind it; on a Wi-Fi only tablet the gain is
-  mostly a faster "no internet" indication.
+- **inet_diag / tcp_info:** no observed problem behind it; the gain is mostly a faster "no
+  internet" indication.
 - **binderfs:** no observed problem behind it, and there is no fallback if the mount fails.
 - **PSI / workingset:** too large and risky for a 3.10 kernel (about 3200 lines, rewrites page
   cache handling unconditionally); lmkd uses the in-kernel low memory killer instead.
@@ -341,8 +386,7 @@ These were analysed, and most were prepared as patches, but are left out of this
   launch time nor scrolling, and Samsung's HMP scheduler and cpufreq driver would need adapting.
 - **Thermal HAL:** a declared thermal HAL that fails to start blocks system_server at boot, and
   the tablet has no skin-temperature sensor; the kernel still throttles on its own.
-- **LTE / RIL:** Wi-Fi only by choice; the 2016 Samsung RIL on Android 17 would be a project of
-  its own.
+- **Voice calls:** the LTE build covers mobile data and SMS only.
 
 ## Credits
 

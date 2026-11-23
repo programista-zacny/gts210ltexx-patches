@@ -81,7 +81,11 @@ if sdk: f["os_sdk_level"] = int(sdk)
 print(json.dumps([{"datetime": int(ts), "files": [f], "type": "UNOFFICIAL", "version": "24.0"}], indent=2))
 EOF
 )
-NOTES="LineageOS 24.0 (Android 17) for the Samsung Galaxy Tab S2 9.7 LTE (SM-T815), Wi-Fi only, microG.
+# NOTES_FILE=<file>: text for "What's new", inserted after the first line.
+NOTES="LineageOS 24.0 (Android 17) for the Samsung Galaxy Tab S2 9.7 LTE (SM-T815): LTE data and SMS (experimental), microG.
+${NOTES_FILE:+
+$(cat "$NOTES_FILE")
+}
 Built from branch $BRANCH at $(git -C "$PUB" rev-parse --short HEAD 2>/dev/null || echo '?').
 
 - $FILENAME: sha256 $sha

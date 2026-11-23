@@ -1,0 +1,35 @@
+# CP boot daemon, LTE build only. Base policy: device/samsung_slsi/sepolicy/common/vendor/cbd.te
+# (domain, /dev/umts_*, the RADIO partition, /proc/cmdline, kmsg, read access to /efs). These are
+# the additions for the stock T815 cbd (static, Android 7) as started by init.baseband.rc.
+
+# /dev/mipi-lli and /dev/mbin0 are symlinks made by init.baseband.rc (label "device").
+allow cbd device:lnk_file r_file_perms;
+
+# /dev/mipi-lli/lli_control, i.e. /sys/devices/10f24000.mipi-lli/lli_control.
+allow cbd sysfs_mipi_writable:dir r_dir_perms;
+allow cbd sysfs_mipi_writable:file rw_file_perms;
+allow cbd sysfs_mipi_writable:lnk_file r_file_perms;
+
+# /efs/nv_data.bin: cbd opens the existing file read-write (O_RDWR) and sends it to the CP, as the
+# stock firmware allowed. Deliberately no "create" on any /efs type and no add_name on /efs:
+# when nv_data.bin is missing, cbd would write a blank NV file (create_default_nv_data); with
+# this policy the open fails and the CP does not boot, which is the safe outcome.
+allow cbd bin_nv_data_efs_file:file rw_file_perms;
+
+# ril.cbd.* (boot_done, rfs_check_done, ...; labelled vendor_radio_prop in property_contexts).
+set_prop(cbd, vendor_radio_prop)
+
+# /proc/device-tree/model_info-system_rev (procfs on 3.10) and /proc/meminfo: read only, as the
+# stock firmware allowed.
+allow cbd proc:file r_file_perms;
+allow cbd proc_meminfo:file r_file_perms;
+
+# Wakelocks while the CP boots (CAP_BLOCK_SUSPEND from init.baseband.rc). gts2-common labels
+# /sys/power/wake_lock and wake_unlock sysfs_power.
+wakelock_use(cbd)
+allow cbd sysfs_power:file rw_file_perms;
+
+# CP state: /sys/bus/platform/drivers/mif_sipc5/mif_pdata.28/cp_status/value (genfs_contexts).
+allow cbd sysfs_modem:dir r_dir_perms;
+allow cbd sysfs_modem:lnk_file r_file_perms;
+allow cbd sysfs_modem:file r_file_perms;

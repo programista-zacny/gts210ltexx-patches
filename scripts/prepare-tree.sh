@@ -15,9 +15,10 @@ if [ ! -f "$VENDOR_BLOBS/gts210ltexx-vendor.mk" ]; then
     echo "no Samsung blobs in $VENDOR_BLOBS: clone proprietary_vendor_samsung_gts210ltexx there, or set VENDOR_BLOBS" >&2
     exit 1
 fi
-# The two prebuilt APKs are not kept in git; scripts/fetch-prebuilts.sh downloads them.
-for apk in device/gts210ltexx/prebuilt/AuroraStore/AuroraStore.apk \
-           tree-overrides/vendor/partner_gms/GmsCore/GmsCore.apk; do
+# The prebuilt Aurora Store APK is not kept in git; scripts/fetch-prebuilts.sh downloads it.
+# microG (GmsCore, FakeStore) and F-Droid come from vendor/partner_gms (lineageos4microg), whose
+# vendorsetup.sh downloads and signature-checks them; until 2026-11-23 GmsCore was overridden here.
+for apk in device/gts210ltexx/prebuilt/AuroraStore/AuroraStore.apk; do
     if [ ! -f "$W/$apk" ]; then
         echo "$apk is missing: run scripts/fetch-prebuilts.sh" >&2
         exit 1
@@ -27,7 +28,9 @@ done
 mkdir -p "$L/device/samsung/gts210ltexx" "$L/vendor/samsung/gts210ltexx"
 rsync -a --delete "$W/device/gts210ltexx/" "$L/device/samsung/gts210ltexx/"
 rsync -a --delete --exclude=/.git --exclude=/README.md "$VENDOR_BLOBS/" "$L/vendor/samsung/gts210ltexx/"
-cp "$W/kernel/lineage_gts210ltexx_defconfig" "$K/arch/arm/configs/lineage_gts210ltexx_defconfig"
+# -p keeps the source file's time: a plain cp gave the copy a new mtime on every run, so the build
+# reconfigured and recompiled the kernel each time even when nothing had changed.
+cp -p "$W/kernel/lineage_gts210ltexx_defconfig" "$K/arch/arm/configs/lineage_gts210ltexx_defconfig"
 
 # local patches: patches/<name>/*.patch applied to the repo listed in patches/<name>/TARGET
 for dir in "$W"/patches/*/; do

@@ -1,0 +1,40 @@
+# rild (hardware/ril/rild) with the Samsung libril and Samsung's libsec-ril.so, LTE build only.
+# Base policy: system/sepolicy (hal_telephony server), device/samsung_slsi/sepolicy/common/vendor
+# (umts nodes, RADIO partition, /efs NV files, /data/vendor/secradio) and device/lineage/sepolicy.
+
+# The radio HAL wrapper (hal_radio_default) is rild's IRadio 1.0 client and passes the
+# framework's response and indication callbacks through, so calls go both ways.
+binder_call(rild, hal_radio_default)
+
+# vendor.rild.libpath and vendor.rild.libargs (lte/vendor.prop).
+get_prop(rild, vendor_default_prop)
+
+# persist.ril.* (lte/sepolicy/property_contexts).
+set_prop(rild, vendor_radio_prop)
+
+# /dev/mbin0, a symlink made by init.baseband.rc (label "device").
+allow rild device:lnk_file r_file_perms;
+
+# /sys/devices/virtual/misc/multipdp/waketime.
+allow rild sysfs_multipdp_writable:dir search;
+allow rild sysfs_multipdp_writable:file rw_file_perms;
+
+# /data/misc/radio: libsec-ril keeps network and band caches there (owner system, group radio);
+# the stock firmware and other legacy-RIL LineageOS trees allow it. radio_data_file is a core
+# data type, hence the exemption from the core/vendor data separation.
+typeattribute rild data_between_core_and_vendor_violators;
+allow rild radio_data_file:dir rw_dir_perms;
+allow rild radio_data_file:file create_file_perms;
+# On Android 17 /data/misc/radio is radio_core_data_file (build 19: "Dir MISC_RADIO_DIR_PATH
+# create failed", search/getattr denied).
+allow rild radio_core_data_file:dir rw_dir_perms;
+allow rild radio_core_data_file:file create_file_perms;
+
+# Properties libsec-ril reads (build 19: system_prop and default_prop read denials). Read only.
+get_prop(rild, system_prop)
+get_prop(rild, default_prop)
+
+# Noise from libsec-ril, without effect: it probes a non-existent rmnet4 (the kernel has
+# rmnet0-3) and stats /data/user_de.
+dontaudit rild kernel:system module_request;
+dontaudit rild system_userdir_file:dir getattr;

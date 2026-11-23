@@ -1,0 +1,9 @@
+#
+# vendor.prop for gts210ltexx, LTE build (WITH_LTE=true, see BoardConfig.mk).
+#
+
+# rild (hardware/ril/rild, built with PRODUCT_COMPATIBLE_PROPERTY) loads Samsung's RIL from
+# vendor.rild.libpath and passes vendor.rild.libargs to RIL_Init. The arguments are the ones the
+# stock firmware and LineageOS 18.1 used; libsec-ril does not use a tty.
+vendor.rild.libpath=/vendor/lib/libsec-ril.so
+vendor.rild.libargs=-d /dev/ttyS0

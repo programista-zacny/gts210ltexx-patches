@@ -1,0 +1,6 @@
+# LTE build only.
+
+# sysfs nodes the stock cbd reads to learn the CP state: it opens the mif_sipc5 platform driver
+# directory, follows its device link (mif_pdata.28) and reads cp_status/value, a link to the
+# CP status GPIO (gpio21). Labelled in genfs_contexts.
+type sysfs_modem, fs_type, sysfs_type;

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- Hardware PNO: the screen-off, disconnected scan that reconnects to saved networks.
+         WificondScannerImpl.isHwPnoSupported() returns this value; with false (the module
+         default) WifiScanningService answers every PNO request with "not supported" and
+         Wi-Fi stays disconnected until the screen comes on. wificond runs the request as an
+         nl80211 scheduled scan, which the bcmdhd4358a3 driver implements as a firmware PFN
+         scan with CONFIG_BCMDHD_SCHED_SCAN (patches/kernel). -->
+    <bool translatable="false" name="config_wifi_background_scan_support">true</bool>
+</resources>

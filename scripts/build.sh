@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
-# Builds LineageOS 24.0 for gts210ltexx (SM-T815, Wi-Fi only, with microG).
+# Builds LineageOS 24.0 for gts210ltexx (SM-T815, with microG).
 # Usage: scripts/build.sh [make goals...]   (default: brunch = full OTA zip)
+#
+# LTE: by default the build includes the LTE modem (mobile data and SMS, no voice calls):
+# WITH_LTE=true, see the LTE blocks in device/gts210ltexx/device.mk and BoardConfig.mk. For the
+# Wi-Fi-only build (the configuration up to build 17), pass WITH_LTE empty:
+#   WITH_LTE= scripts/build.sh
+#   scripts/docker-run.sh env WITH_LTE= scripts/build.sh      (in the build container)
+# Switching between the two needs no clean build; what differs (libril, netd, build.prop, SELinux
+# policy, framework overlays, ...) is rebuilt.
 set -uo pipefail
 # Project root: GTS_ROOT, else the directory above this script. LineageOS tree: LINEAGE_ROOT,
 # else lineage/ in the project root. An env.sh in the project root, if there is one, is sourced.
@@ -20,6 +28,16 @@ export WITH_ADB_INSECURE="${WITH_ADB_INSECURE-}"
 # diagnosis; LineageOS would set ro.debuggable=0 (patches/vendor_lineage/0001 adds this switch).
 # Pass LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG= (empty) for the official behaviour.
 export LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG="${LINEAGE_KEEP_DEBUGGABLE_IN_USERDEBUG-true}"
+# LTE modem (see the header): on unless WITH_LTE is set and empty (or anything but "true").
+export WITH_LTE="${WITH_LTE-true}"
+[ -n "$WITH_LTE" ] || unset WITH_LTE
+echo "WITH_LTE=${WITH_LTE:-} ($([ "${WITH_LTE:-}" = true ] && echo 'LTE: mobile data and SMS' || echo 'Wi-Fi only'))"
+# Wi-Fi PNO (screen-off reconnect, see device/gts210ltexx/device.mk): on unless WITH_WIFI_PNO is
+# set and empty. WITH_WIFI_PNO= builds without the Wi-Fi RRO: the framework then never asks for
+# PNO, as in builds up to 21.
+export WITH_WIFI_PNO="${WITH_WIFI_PNO-true}"
+[ -n "$WITH_WIFI_PNO" ] || unset WITH_WIFI_PNO
+echo "WITH_WIFI_PNO=${WITH_WIFI_PNO:-}"
 
 # --- own signing keys: opt-in with OWN_KEYS=1 (see "Own signing keys" in README.md) -----------
 # With OWN_KEYS=1 prepare-tree.sh (above) has installed keys/ as vendor/lineage-priv/keys and the
@@ -40,7 +58,20 @@ fi
 # --- end of own signing keys --------------------------------------------------------------------
 
 export LC_ALL=C
-export USE_CCACHE=0
+# ccache (owner, 2026-11-23): C/C++ and the kernel are taken from the cache when their content is
+# unchanged, e.g. after prepare-tree re-applies patches with new mtimes or after a source sync.
+# The cache lives in the project (ccache/, mounted into the container with the project), so it
+# survives the --rm container; 50 GB cap. USE_CCACHE= (empty) builds without it.
+export USE_CCACHE="${USE_CCACHE-1}"
+if [ -n "$USE_CCACHE" ]; then
+    export CCACHE_EXEC=/usr/bin/ccache
+    export CCACHE_DIR="${CCACHE_DIR:-$W/ccache}"
+    mkdir -p "$CCACHE_DIR"
+    "$CCACHE_EXEC" -M 50G >/dev/null
+    "$CCACHE_EXEC" -z >/dev/null    # per-build statistics: see "ccache -s" at the end of the log
+else
+    unset USE_CCACHE
+fi
 # Parallelism: 20 jobs on 30 GB RAM ran the host out of memory in the Java/dex phase
 # (2026-11-06, ~73%); 12 jobs finished cleanly. Override with BUILD_JOBS=N.
 JOBS="${BUILD_JOBS:-12}"
@@ -58,3 +89,6 @@ set +u
 source build/envsetup.sh || exit 1
 [ $# -gt 0 ] || set -- bacon          # bacon = full OTA zip (what brunch builds)
 breakfast gts210ltexx userdebug && m -j"$JOBS" "$@"
+rc=$?
+[ -z "${USE_CCACHE:-}" ] || "$CCACHE_EXEC" -s | sed 's/^/ccache: /'
+exit $rc

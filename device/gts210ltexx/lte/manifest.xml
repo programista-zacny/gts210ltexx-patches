@@ -1,0 +1,12 @@
+<!-- LTE build only (WITH_LTE=true): added to DEVICE_MANIFEST_FILE by BoardConfig.mk.
+     rild (Samsung libril) registers IRadio 1.0 "slot1"; android.hardware.radio@1.4-service.legacy
+     takes it and serves IRadio 1.4 under the same name. Android 17 accepts HIDL IRadio 1.4 to 1.6
+     (or AIDL); a 1.4 entry also covers rild's 1.0 registration. Not declared: ISap and the OEM
+     hook (radio.deprecated IOemHook); libril tries to register them and logs that it cannot. -->
+<manifest version="1.0" type="device">
+    <hal format="hidl">
+        <name>android.hardware.radio</name>
+        <transport>hwbinder</transport>
+        <fqname>@1.4::IRadio/slot1</fqname>
+    </hal>
+</manifest>

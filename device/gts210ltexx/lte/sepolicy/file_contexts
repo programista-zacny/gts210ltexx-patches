@@ -1,0 +1,10 @@
+# LTE build only (WITH_LTE=true, BoardConfig.mk). The modem types and most labels come from
+# device/samsung_slsi/sepolicy/common/vendor (cbd, rild, /dev/umts_*, /efs/nv_data.bin, the
+# RADIO partition by name) and from system/sepolicy (rild_exec) and device/lineage/sepolicy
+# (the radio HAL wrapper).
+
+# cbd opens the RADIO partition by its node (-p 13), not through by-name.
+/dev/block/mmcblk0p13       u:object_r:radio_block_device:s0
+
+# CP crash dump channel, used by cbd (the other umts nodes are labelled by samsung_slsi).
+/dev/umts_ramdump0          u:object_r:vendor_radio_device:s0

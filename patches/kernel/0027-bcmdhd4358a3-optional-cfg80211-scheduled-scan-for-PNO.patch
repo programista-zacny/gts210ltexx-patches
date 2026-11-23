@@ -1,0 +1,70 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] bcmdhd4358a3: optional cfg80211 scheduled scan for PNO
+
+Android's Wi-Fi framework reconnects with the screen off through PNO:
+WifiConnectivityManager asks WifiScanningService, which asks wificond,
+which sends NL80211_CMD_START_SCHED_SCAN. This driver has a complete
+scheduled-scan implementation (wl_cfg80211_sched_scan_start/stop and
+wl_notify_sched_scan_results on top of the firmware PFN, dhd_pno.c), but
+it is compiled only with WL_SCHED_SCAN, which the Makefile never sets.
+The wiphy then lacks WIPHY_FLAG_SUPPORTS_SCHED_SCAN and reports
+max_sched_scan_ssids = max_match_sets = 0, and nl80211 answers every
+START_SCHED_SCAN with EOPNOTSUPP. PNO was left reachable only through the
+Android private command PNOSETUP, which nothing sends since wificond.
+
+Add CONFIG_BCMDHD_SCHED_SCAN (default n) that sets WL_SCHED_SCAN. With it
+the driver advertises 16 sched-scan SSIDs and match sets and runs the
+request as a legacy PFN scan: 30 s for 4 scans, then backing off to
+120 s (PNO_TIME, PNO_REPEAT, PNO_FREQ_EXPO_MAX in wl_cfg80211.c), all in
+firmware. A PFN_NET_FOUND event wakes the host (10 s wake lock,
+CUSTOM_PNO_EVENT_LOCK_xTIME), the driver runs a targeted escan and
+reports cfg80211_sched_scan_results(), and the framework connects.
+
+wificond always puts the wildcard SSID into NL80211_ATTR_SCAN_SSIDS, so
+the driver's n_ssids != 0 check is met without hidden networks.
+Syntax-checked with the build's own gcc 4.9 command line for
+wl_cfg80211.c and wl_android.c: no new warnings.
+
+Observed on the SM-T815 (build 21, 2026-11-22/23): Wi-Fi dropped with the
+screen off (AP deauth reason 7) and stayed down until the screen came on,
+up to 20.8 h; numPnoScanAttempts=0. Analysis: staging/wifi-pno/.
+---
+index c8b9d7d..e1d13cb 100644
+--- a/drivers/net/wireless/bcmdhd4358a3/Kconfig
++++ b/drivers/net/wireless/bcmdhd4358a3/Kconfig
+@@ -129,6 +129,19 @@ config BCMDHD_PCIE
+ 	---help---
+ 	  Enable PCI Express I/F Support
+ 
++config BCMDHD_SCHED_SCAN
++	bool "PNO through cfg80211 scheduled scan"
++	depends on (BCM4354 || BCM4358)
++	default n
++	---help---
++	  Build the driver with WL_SCHED_SCAN: advertise nl80211 scheduled
++	  scan (WIPHY_FLAG_SUPPORTS_SCHED_SCAN, max_sched_scan_ssids,
++	  max_match_sets) and run NL80211_CMD_START_SCHED_SCAN as a firmware
++	  PFN (preferred network offload) scan. wificond starts such a scan
++	  for the Wi-Fi framework while the screen is off and Wi-Fi is
++	  disconnected. Without it the driver keeps PNO only behind the
++	  Android private command PNOSETUP, which nothing uses any more.
++
+ config BCMDHD_DEBUG_PAGEALLOC
+ 	bool "Enable Memory Pagealloc Debugging Support"
+ 	depends on (BCM4354 || BCM4358)
+diff --git a/drivers/net/wireless/bcmdhd4358a3/Makefile b/drivers/net/wireless/bcmdhd4358a3/Makefile
+index def2d46..778844a 100644
+--- a/drivers/net/wireless/bcmdhd4358a3/Makefile
++++ b/drivers/net/wireless/bcmdhd4358a3/Makefile
+@@ -68,6 +68,11 @@ endif
+ DHDCFLAGS += -DCUSTOMER_HW4
+ DHDCFLAGS += -DWL_CFG80211
+ 
++# Scheduled scan (PNO) for wificond, see CONFIG_BCMDHD_SCHED_SCAN
++ifeq ($(CONFIG_BCMDHD_SCHED_SCAN),y)
++DHDCFLAGS += -DWL_SCHED_SCAN
++endif
++
+ # DMA64 suppports on 64bit Architecture
+ ifeq ($(CONFIG_64BIT),y)
+ DHDCFLAGS := $(filter-out -DBCMDMA32,$(DHDCFLAGS))

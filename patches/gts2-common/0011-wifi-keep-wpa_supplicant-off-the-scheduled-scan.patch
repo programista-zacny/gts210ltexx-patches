@@ -1,0 +1,21 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] wifi: keep wpa_supplicant off the scheduled scan
+
+With the kernel's CONFIG_BCMDHD_SCHED_SCAN the driver advertises nl80211
+scheduled scan. cfg80211 in kernel 3.10 runs one scheduled scan per
+radio, and wpa_supplicant starts one of its own when its network is not
+found (events.c, scan.c: wpa_supplicant_req_sched_scan). That would take
+the slot wificond needs for the framework's PNO (EINPROGRESS) and scan
+with the supplicant's own schedule. disable_scan_offload=1 keeps the
+supplicant on normal scans, as before; p2p_supplicant_overlay.conf
+already sets it, as do the AOSP emulator configs (goldfish, cuttlefish).
+---
+diff --git a/configs/wifi/wpa_supplicant_overlay.conf b/configs/wifi/wpa_supplicant_overlay.conf
+index f004553..42bc175 100644
+--- a/configs/wifi/wpa_supplicant_overlay.conf
++++ b/configs/wifi/wpa_supplicant_overlay.conf
+@@ -1,3 +1,4 @@
++disable_scan_offload=1
+ p2p_disabled=0
+ update_config=1
+ pmf=1

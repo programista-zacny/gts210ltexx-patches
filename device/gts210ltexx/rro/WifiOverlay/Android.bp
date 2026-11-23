@@ -1,0 +1,16 @@
+// Runtime resource overlay for the Wi-Fi mainline module's resources
+// (com.android.wifi.resources, overlayable "WifiCustomization").
+//
+// Since Android 11 the Wi-Fi service reads its config_wifi_* values from
+// ServiceWifiResources in the com.android.wifi APEX, not from framework-res.
+// gts2-common still sets config_wifi_background_scan_support in its
+// frameworks/base overlay, where the Wi-Fi service never looks, so the module
+// default (false) applies and every PNO request ends in "not supported".
+// Installed only with WITH_WIFI_PNO=true (device.mk).
+
+runtime_resource_overlay {
+    name: "WifiOverlayGts210ltexx",
+    resource_dirs: ["res"],
+    vendor: true,
+    sdk_version: "current",
+}

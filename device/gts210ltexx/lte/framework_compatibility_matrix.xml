@@ -1,0 +1,14 @@
+<!-- LTE build only (WITH_LTE=true): added to DEVICE_FRAMEWORK_COMPATIBILITY_MATRIX_FILE by
+     BoardConfig.mk. The framework matrix of target level 7 lists HIDL IRadio only as 1.5-1.6;
+     the radio HAL of this device is IRadio 1.4 (lte/manifest.xml), which the Android 17
+     telephony framework still accepts. -->
+<compatibility-matrix version="2.0" type="framework">
+    <hal format="hidl">
+        <name>android.hardware.radio</name>
+        <version>1.4</version>
+        <interface>
+            <name>IRadio</name>
+            <instance>slot1</instance>
+        </interface>
+    </hal>
+</compatibility-matrix>

@@ -1,0 +1,16 @@
+# LTE build only. Labels take effect on this 3.10 kernel through kernel patch 0013.
+
+# MIPI-LLI link of the modem: cbd reads /dev/mipi-lli/lli_control (init.baseband.rc links
+# /dev/mipi-lli to this directory). The type comes from gts2-common.
+genfscon sysfs /devices/10f24000.mipi-lli                   u:object_r:sysfs_mipi_writable:s0
+
+# Packet data driver: Samsung's RIL writes waketime. The type comes from gts2-common.
+genfscon sysfs /devices/virtual/misc/multipdp               u:object_r:sysfs_multipdp_writable:s0
+
+# CP status for cbd: /sys/bus/platform/drivers/mif_sipc5 -> mif_pdata.28 -> cp_status/value, which
+# is the exported CP status GPIO. Build 19 had them as plain "sysfs": cbd's opendir of mif_sipc5 was
+# denied, the CP boot failed ("shannon_boot_xmit_loader fail") and cbd power-cycled the CP every
+# ~8 s (logs/boot-19/).
+genfscon sysfs /bus/platform/drivers/mif_sipc5              u:object_r:sysfs_modem:s0
+genfscon sysfs /devices/mif_pdata.28                        u:object_r:sysfs_modem:s0
+genfscon sysfs /devices/10580000.pinctrl/gpio/gpio21        u:object_r:sysfs_modem:s0

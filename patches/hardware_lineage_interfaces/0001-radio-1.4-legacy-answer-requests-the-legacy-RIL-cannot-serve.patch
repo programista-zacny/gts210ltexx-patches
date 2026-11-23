@@ -1,0 +1,219 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] radio: 1.4 legacy: answer requests the legacy RIL cannot serve
+
+The 1.0 -> 1.4 wrapper is the radio HAL of the LTE build of the SM-T815
+(Samsung libril, HIDL IRadio 1.0, with Samsung's legacy libsec-ril.so).
+
+- Requests without an IRadio 1.0 counterpart were dropped without a
+  response (marked TODO). The framework then waited for each until its
+  request timeout, holding a wakelock all that time, and logged them as
+  unanswered; enableModem and getModemStackStatus are sent at every
+  start of the phone process. Answer them at once instead:
+  REQUEST_NOT_SUPPORTED for setCarrierInfoForImsiEncryption, the
+  network scans, the keepalives, the signal strength and link capacity
+  reporting criteria and emergencyDial (this build has no voice calls,
+  config_voice_capable is false); success for enableModem(true),
+  getModemStackStatus (enabled) and setSystemSelectionChannels without
+  channels. setupDataCall_1_2 keeps its TODO: the framework never calls
+  it on a 1.4 HAL.
+- setPreferredNetworkTypeBitmap: drop radio access families the mapping
+  does not know (NR, IWLAN) before mapping the bitmap to a 1.0 network
+  type. With them, every bitmap fell through to the default
+  LTE_CMDA_EVDO_GSM_WCDMA.
+- getSmscAddressResponse: Samsung RILs answer in the AT+CSCA form,
+  quoted number followed by the type of address; pass the bare number.
+---
+diff --git a/radio/1.4/legacy/Radio.cpp b/radio/1.4/legacy/Radio.cpp
+index 4af7e35..9c3b335 100644
+--- a/radio/1.4/legacy/Radio.cpp
++++ b/radio/1.4/legacy/Radio.cpp
+@@ -57,6 +57,32 @@
+ 
+ namespace android::hardware::radio::implementation {
+ 
++// gts210ltexx: the legacy RIL (IRadio 1.0) has no counterpart for some of the newer requests, and
++// this wrapper used to drop them without an answer. The framework then waits for each of them
++// until its request timeout (holding its wakelock all that time) and logs it as unanswered. Answer
++// them here instead: REQUEST_NOT_SUPPORTED, or success where the answer is known (the modem is on,
++// no channel restriction).
++static V1_0::RadioResponseInfo legacyResponseInfo(int32_t serial, V1_0::RadioError error) {
++    V1_0::RadioResponseInfo info = {};
++    info.type = V1_0::RadioResponseType::SOLICITED;
++    info.serial = serial;
++    info.error = error;
++    return info;
++}
++
++#define RESPOND_LEGACY(method, error, ...)                                                     \
++    do {                                                                                       \
++        sp<V1_4::IRadioResponse> realResponse = mRadioResponse->mRealRadioResponse;            \
++        if (realResponse != nullptr) {                                                         \
++            Return<void> ret =                                                                 \
++                    realResponse->method(legacyResponseInfo(serial, error), ##__VA_ARGS__);    \
++            if (!ret.isOk()) {                                                                 \
++                LOG(ERROR) << #method << " failed: " << ret.description();                     \
++            }                                                                                  \
++        }                                                                                      \
++        return Void();                                                                         \
++    } while (0)
++
+ Radio::Radio(sp<V1_0::IRadio> realRadio) : mRealRadio(realRadio) {}
+ 
+ // Methods from ::android::hardware::radio::V1_0::IRadio follow.
+@@ -619,8 +645,7 @@ Return<void> Radio::setCarrierInfoForImsiEncryption(
+         int32_t serial, const V1_1::ImsiEncryptionInfo& imsiEncryptionInfo) {
+     MAYBE_WRAP_V1_1_CALL(setCarrierInfoForImsiEncryption, serial, imsiEncryptionInfo);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(setCarrierInfoForImsiEncryptionResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::setSimCardPower_1_1(int32_t serial, V1_1::CardPowerState powerUp) {
+@@ -635,37 +660,32 @@ Return<void> Radio::setSimCardPower_1_1(int32_t serial, V1_1::CardPowerState pow
+ Return<void> Radio::startNetworkScan(int32_t serial, const V1_1::NetworkScanRequest& request) {
+     MAYBE_WRAP_V1_1_CALL(startNetworkScan, serial, request);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(startNetworkScanResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::stopNetworkScan(int32_t serial) {
+     MAYBE_WRAP_V1_1_CALL(stopNetworkScan, serial);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(stopNetworkScanResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::startKeepalive(int32_t serial, const V1_1::KeepaliveRequest& keepalive) {
+     MAYBE_WRAP_V1_1_CALL(startKeepalive, serial, keepalive);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(startKeepaliveResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED, V1_1::KeepaliveStatus{});
+ }
+ 
+ Return<void> Radio::stopKeepalive(int32_t serial, int32_t sessionHandle) {
+     MAYBE_WRAP_V1_1_CALL(stopKeepalive, serial, sessionHandle);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(stopKeepaliveResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ // Methods from ::android::hardware::radio::V1_2::IRadio follow.
+ Return<void> Radio::startNetworkScan_1_2(int32_t serial, const V1_2::NetworkScanRequest& request) {
+     MAYBE_WRAP_V1_2_CALL(startNetworkScan_1_2, serial, request);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(startNetworkScanResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::setIndicationFilter_1_2(
+@@ -681,8 +701,7 @@ Return<void> Radio::setSignalStrengthReportingCriteria(int32_t serial, int32_t h
+     MAYBE_WRAP_V1_2_CALL(setSignalStrengthReportingCriteria, serial, hysteresisMs, hysteresisDb,
+                          thresholdsDbm, accessNetwork);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(setSignalStrengthReportingCriteriaResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::setLinkCapacityReportingCriteria(
+@@ -693,8 +712,7 @@ Return<void> Radio::setLinkCapacityReportingCriteria(
+                          hysteresisUlKbps, thresholdsDownlinkKbps, thresholdsUplinkKbps,
+                          accessNetwork);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(setLinkCapacityReportingCriteriaResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::setupDataCall_1_2(int32_t serial, V1_2::AccessNetwork accessNetwork,
+@@ -722,22 +740,21 @@ Return<void> Radio::setSystemSelectionChannels(
+         const hidl_vec<V1_1::RadioAccessSpecifier>& specifiers) {
+     MAYBE_WRAP_V1_3_CALL(setSystemSelectionChannels, serial, specifyChannels, specifiers);
+ 
+-    // TODO implement
+-    return Void();
++    // Without channels this asks for no restriction, which is what the modem does anyway.
++    RESPOND_LEGACY(setSystemSelectionChannelsResponse, specifyChannels ? V1_0::RadioError::REQUEST_NOT_SUPPORTED : V1_0::RadioError::NONE);
+ }
+ 
+ Return<void> Radio::enableModem(int32_t serial, bool on) {
+     MAYBE_WRAP_V1_3_CALL(enableModem, serial, on);
+ 
+-    // TODO implement
+-    return Void();
++    // Single SIM, single modem: it is on while the RIL runs; switching it off is not offered.
++    RESPOND_LEGACY(enableModemResponse, on ? V1_0::RadioError::NONE : V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::getModemStackStatus(int32_t serial) {
+     MAYBE_WRAP_V1_3_CALL(getModemStackStatus, serial);
+ 
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(getModemStackStatusResponse, V1_0::RadioError::NONE, true);
+ }
+ 
+ hidl_string getProtocolStringFromInt(const V1_4::PdpProtocolType protocol){
+@@ -820,8 +837,9 @@ Return<void> Radio::emergencyDial(int32_t serial, const V1_0::Dial& dialInfo,
+     MAYBE_WRAP_V1_4_CALL(emergencyDial, serial, dialInfo, categories, urns, routing,
+                          hasKnownUserIntentEmergency, isTesting);
+ 
+-    // TODO implement
+-    return Void();
++    // Voice calls are not supported on this build (config_voice_capable is false); answer
++    // at once so that an emergency call attempt fails fast instead of waiting for a timeout.
++    RESPOND_LEGACY(emergencyDialResponse, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::startNetworkScan_1_4(int32_t serial, const V1_2::NetworkScanRequest& request) {
+@@ -834,8 +852,7 @@ Return<void> Radio::startNetworkScan_1_4(int32_t serial, const V1_2::NetworkScan
+     legacyRequest.specifiers = request.specifiers;
+ 
+     MAYBE_WRAP_V1_1_CALL(startNetworkScan, serial, legacyRequest);
+-    // TODO implement
+-    return Void();
++    RESPOND_LEGACY(startNetworkScanResponse_1_4, V1_0::RadioError::REQUEST_NOT_SUPPORTED);
+ }
+ 
+ Return<void> Radio::getPreferredNetworkTypeBitmap(int32_t serial) {
+@@ -848,6 +865,11 @@ Return<void> Radio::setPreferredNetworkTypeBitmap(
+         int32_t serial, hidl_bitfield<V1_4::RadioAccessFamily> networkTypeBitmap) {
+     MAYBE_WRAP_V1_4_CALL(setPreferredNetworkTypeBitmap, serial, networkTypeBitmap);
+ 
++    // gts210ltexx: keep only the families the switch below knows. The framework may add NR or
++    // IWLAN bits, which made the bitmap match no case and fall through to the default (with
++    // CDMA and EVDO, which a GSM/WCDMA/LTE modem may reject); LTE+WCDMA+GSM is mode 9.
++    networkTypeBitmap &= (GSMBITS | CDMABITS | EVDOBITS | WCDMABITS | LTEBITS | TDSCDMABIT);
++
+     if(networkTypeBitmap & GSMBITS)
+         networkTypeBitmap |= GSMBITS;
+     if(networkTypeBitmap & CDMABITS)
+diff --git a/radio/1.4/legacy/RadioResponse.cpp b/radio/1.4/legacy/RadioResponse.cpp
+index 3190c9d..69995a7 100644
+--- a/radio/1.4/legacy/RadioResponse.cpp
++++ b/radio/1.4/legacy/RadioResponse.cpp
+@@ -563,7 +563,16 @@ Return<void> RadioResponse::exitEmergencyCallbackModeResponse(const V1_0::RadioR
+ 
+ Return<void> RadioResponse::getSmscAddressResponse(const V1_0::RadioResponseInfo& info,
+                                                    const hidl_string& smsc) {
+-    return mRealRadioResponse->getSmscAddressResponse(info, smsc);
++    // gts210ltexx: Samsung RILs answer with the AT+CSCA form, the quoted number followed by the
++    // type of address ("\"+<number>\",145"). The framework expects the bare number.
++    std::string address = smsc;
++    if (address.size() > 1 && address[0] == '"') {
++        size_t end = address.find('"', 1);
++        if (end != std::string::npos) {
++            address = address.substr(1, end - 1);
++        }
++    }
++    return mRealRadioResponse->getSmscAddressResponse(info, hidl_string(address));
+ }
+ 
+ Return<void> RadioResponse::setSmscAddressResponse(const V1_0::RadioResponseInfo& info) {

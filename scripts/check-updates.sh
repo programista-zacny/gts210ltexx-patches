@@ -92,6 +92,12 @@ echo
 # --- 4. prebuilt apps ------------------------------------------------------------------------
 echo "== Prebuilt apps (shipped, from scripts/fetch-prebuilts.sh)"
 grep -E '^ *"[^"|]+\|[^|]+\|https://' "$W/scripts/fetch-prebuilts.sh" | sed -E 's/^ *"([^|]*)\|.*/   shipped: \1/'
+PG=$L/vendor/partner_gms
+echo "   shipped (vendor/partner_gms, lineageos4microg $(git -C "$PG" log -1 --format=%h 2>/dev/null)):" \
+     "microG $(cat "$PG/.microg_release" 2>/dev/null)," \
+     "GmsCore $(cat "$PG/GmsCore/.version_code" 2>/dev/null), FakeStore $(cat "$PG/FakeStore/.version_code" 2>/dev/null)," \
+     "F-Droid $(cat "$PG/FDroid/.version_code" 2>/dev/null)"
+echo "   lineageos4microg partner_gms upstream: $(git ls-remote https://github.com/lineageos4microg/android_vendor_partner_gms refs/heads/master 2>/dev/null | cut -c1-7)"
 echo "   microG GmsCore latest releases:"
 gh api "repos/microg/GmsCore/releases?per_page=3" --jq '.[] | "     \(.published_at[0:10]) \(.tag_name)\(if .prerelease then " (pre-release)" else "" end)"' 2>/dev/null
 echo "   microG issue #3853 (Aurora login): $(gh api repos/microg/GmsCore/issues/3853 --jq .state 2>/dev/null)"

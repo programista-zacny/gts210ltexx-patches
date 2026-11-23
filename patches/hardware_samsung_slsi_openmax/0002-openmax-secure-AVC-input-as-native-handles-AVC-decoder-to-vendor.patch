@@ -1,0 +1,293 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] openmax: secure AVC input as native handles, AVC decoder to vendor
+
+Widevine L1 decryption into OMX.Exynos.avc.dec.secure failed with
+"wv_dash: Invalid secure handle" in Samsung's liboemcrypto. The secure
+decoder hands out its input buffers (ION, contig heap, MFC input region,
+ION_FLAG_PROTECTED) with pBuffer = the ION fd cast to a pointer, and
+supports neither OMX.google.android.index.allocateNativeHandle nor
+metadata mode. OMXNodeInstance then uses kSecureBufferTypeOpaque, the
+Treble IOmx returns only a native handle (none here), ACodec sends a
+NULL hidl_handle as the decrypt destination, and libwvhidl passes it on
+to OEMCrypto, which expects a native_handle_t with the dma-buf fd in
+data[0] (it resolves the fd to a physical address through /dev/s5p-smem)
+and rejects NULL (return 0x1d). Analysis:
+staging/widevine-l1-analysis/RE-secure-handle-20261111.md.
+
+Support allocateNativeHandle on the input port of the secure decoder:
+
+- GetExtensionIndex returns OMX_IndexParamAllocateNativeHandle for the
+  secure codec only; the non-secure codec still reports it unsupported.
+- SetParameter (EnableAndroidNativeBuffersParams layout) sets
+  bAllocateNativeHandle for the input port of the secure codec. enable
+  on any other port is OMX_ErrorUnsupportedSetting, disable there is a
+  no-op (OMXNodeInstance disables it on every port mode change). The
+  flag cannot change while input buffers exist.
+- AllocateBuffer wraps the ION fd in native_handle_create(1, 0) and
+  returns the handle as pBuffer. The fd is not duplicated: it stays
+  owned by the shared-memory list; HIDL dups it for the transfer.
+- FreeBuffer takes the fd from data[0], frees the ION buffer as before
+  (which closes the fd) and then native_handle_delete()s the handle,
+  without native_handle_close(), so the fd is closed once.
+- Exynos_Preprocessor_InputData gets the fd through the same helper,
+  Exynos_OMX_SecureInputBufferToFD(); without the flag the helper
+  returns the fd-as-pointer as before.
+
+Install libOMX.Exynos.AVC.Decoder to /vendor/lib/omx/ (where the Exynos
+OMX core loads components from) so that it replaces the gts2-common AVC
+blob; device.mk drops the blob copy. This also moves the non-secure
+OMX.Exynos.avc.dec to the source build. The source components share the
+struct layout of the source-built libExynosOMX_Resourcemanager.
+---
+diff --git a/component/video/dec/Exynos_OMX_Vdec.c b/component/video/dec/Exynos_OMX_Vdec.c
+index 22c3a67..d214e87 100644
+--- a/component/video/dec/Exynos_OMX_Vdec.c
++++ b/component/video/dec/Exynos_OMX_Vdec.c
+@@ -29,6 +29,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <cutils/native_handle.h>
+ #include "Exynos_OMX_Macros.h"
+ #include "Exynos_OSAL_Event.h"
+ #include "Exynos_OMX_Vdec.h"
+@@ -800,6 +801,23 @@ EXIT:
+     return ret;
+ }
+ 
++/* ION fd behind pBuffer of a secure input buffer: a native_handle_t with the fd in data[0]
++ * when allocateNativeHandle is enabled, otherwise the fd cast to a pointer */
++int Exynos_OMX_SecureInputBufferToFD(EXYNOS_OMX_VIDEODEC_COMPONENT *pVideoDec, OMX_PTR pBuffer)
++{
++    if ((pVideoDec != NULL) && (pVideoDec->bAllocateNativeHandle == OMX_TRUE)) {
++        native_handle_t *pNativeHandle = (native_handle_t *)pBuffer;
++
++        if ((pNativeHandle == NULL) || (pNativeHandle->numFds < 1))
++            return -1;
++
++        return pNativeHandle->data[0];
++    }
++
++    /* caution : data loss */
++    return PTR_TO_INT(pBuffer);
++}
++
+ OMX_BOOL Exynos_Preprocessor_InputData(OMX_COMPONENTTYPE *pOMXComponent, EXYNOS_OMX_DATA *srcInputData)
+ {
+     OMX_BOOL               ret = OMX_FALSE;
+@@ -829,8 +847,7 @@ OMX_BOOL Exynos_Preprocessor_InputData(OMX_COMPONENTTYPE *pOMXComponent, EXYNOS_
+                 int ionFD = -1;
+                 OMX_PTR dataBuffer = NULL;
+ 
+-                /* caution : data loss */
+-                ionFD = PTR_TO_INT(srcInputData->multiPlaneBuffer.dataBuffer[0]);
++                ionFD = Exynos_OMX_SecureInputBufferToFD(pVideoDec, srcInputData->multiPlaneBuffer.dataBuffer[0]);
+ 
+                 dataBuffer = Exynos_OSAL_SharedMemory_IONToVirt(pVideoDec->hSharedMemory, ionFD);
+                 if (dataBuffer == NULL) {
+diff --git a/component/video/dec/Exynos_OMX_Vdec.h b/component/video/dec/Exynos_OMX_Vdec.h
+index 0337ba8..237d20e 100644
+--- a/component/video/dec/Exynos_OMX_Vdec.h
++++ b/component/video/dec/Exynos_OMX_Vdec.h
+@@ -168,6 +168,11 @@ typedef struct _EXYNOS_OMX_VIDEODEC_COMPONENT
+     OMX_ERRORTYPE (*exynos_codec_reconfigAllBuffers) (OMX_COMPONENTTYPE *pOMXComponent, OMX_U32 nPortIndex);
+     OMX_BOOL      (*exynos_codec_checkFormatSupport)(EXYNOS_OMX_BASECOMPONENT *pExynosComponent, OMX_COLOR_FORMATTYPE eColorFormat);
+     OMX_ERRORTYPE (*exynos_codec_checkResolutionChange)(OMX_COMPONENTTYPE *pOMXComponent);
++
++    /* secure codec only: input buffers from AllocateBuffer are native_handle_t with the ION fd
++     * in data[0] (OMX.google.android.index.allocateNativeHandle); set only while the input port
++     * has no buffers */
++    OMX_BOOL bAllocateNativeHandle;
+ } EXYNOS_OMX_VIDEODEC_COMPONENT;
+ 
+ #ifdef __cplusplus
+@@ -182,6 +187,7 @@ void Exynos_GetReorderTimestamp(EXYNOS_OMX_BASECOMPONENT *pExynosComponent, EXYN
+ OMX_BOOL Exynos_Check_BufferProcess_State(EXYNOS_OMX_BASECOMPONENT *pExynosComponent, OMX_U32 nPortIndex);
+ OMX_ERRORTYPE Exynos_CodecBufferToData(CODEC_DEC_BUFFER *codecBuffer, EXYNOS_OMX_DATA *pData, OMX_U32 nPortIndex);
+ OMX_BOOL Exynos_Preprocessor_InputData(OMX_COMPONENTTYPE *pOMXComponent, EXYNOS_OMX_DATA *srcInputData);
++int Exynos_OMX_SecureInputBufferToFD(EXYNOS_OMX_VIDEODEC_COMPONENT *pVideoDec, OMX_PTR pBuffer);
+ OMX_ERRORTYPE Exynos_OMX_SrcInputBufferProcess(OMX_HANDLETYPE hComponent);
+ OMX_ERRORTYPE Exynos_OMX_SrcOutputBufferProcess(OMX_HANDLETYPE hComponent);
+ OMX_ERRORTYPE Exynos_OMX_DstInputBufferProcess(OMX_HANDLETYPE hComponent);
+diff --git a/component/video/dec/Exynos_OMX_VdecControl.c b/component/video/dec/Exynos_OMX_VdecControl.c
+index 1af85a9..72e2f0f 100644
+--- a/component/video/dec/Exynos_OMX_VdecControl.c
++++ b/component/video/dec/Exynos_OMX_VdecControl.c
+@@ -27,6 +27,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <cutils/native_handle.h>
+ #include "Exynos_OMX_Macros.h"
+ #include "Exynos_OSAL_Event.h"
+ #include "Exynos_OMX_Vdec.h"
+@@ -181,6 +182,7 @@ OMX_ERRORTYPE Exynos_OMX_AllocateBuffer(
+     OMX_BUFFERHEADERTYPE  *temp_bufferHeader = NULL;
+     OMX_U8                *temp_buffer = NULL;
+     int                    temp_buffer_fd = -1;
++    native_handle_t       *temp_native_handle = NULL;
+     OMX_U32                i = 0;
+     MEMORY_TYPE            mem_type = NORMAL_MEMORY;
+ 
+@@ -237,8 +239,23 @@ OMX_ERRORTYPE Exynos_OMX_AllocateBuffer(
+     }
+     temp_buffer_fd = Exynos_OSAL_SharedMemory_VirtToION(pVideoDec->hSharedMemory, temp_buffer);
+ 
++    /* allocateNativeHandle: hand the secure input buffer out as a native handle that wraps
++     * the ION fd. The fd stays owned by the shared memory list (closed in FreeBuffer). */
++    if ((mem_type & SECURE_MEMORY) &&
++        (pVideoDec->bAllocateNativeHandle == OMX_TRUE)) {
++        temp_native_handle = native_handle_create(1, 0);
++        if (temp_native_handle == NULL) {
++            Exynos_OSAL_SharedMemory_Free(pVideoDec->hSharedMemory, temp_buffer);
++            ret = OMX_ErrorInsufficientResources;
++            goto EXIT;
++        }
++        temp_native_handle->data[0] = temp_buffer_fd;
++    }
++
+     temp_bufferHeader = (OMX_BUFFERHEADERTYPE *)Exynos_OSAL_Malloc(sizeof(OMX_BUFFERHEADERTYPE));
+     if (temp_bufferHeader == NULL) {
++        if (temp_native_handle != NULL)
++            native_handle_delete(temp_native_handle);
+         Exynos_OSAL_SharedMemory_Free(pVideoDec->hSharedMemory, temp_buffer);
+         ret = OMX_ErrorInsufficientResources;
+         goto EXIT;
+@@ -251,7 +268,9 @@ OMX_ERRORTYPE Exynos_OMX_AllocateBuffer(
+             pExynosPort->extendBufferHeader[i].buf_fd[0] = temp_buffer_fd;
+             pExynosPort->bufferStateAllocate[i] = (BUFFER_STATE_ALLOCATED | HEADER_STATE_ALLOCATED);
+             INIT_SET_SIZE_VERSION(temp_bufferHeader, OMX_BUFFERHEADERTYPE);
+-            if (pExynosComponent->codecType == HW_VIDEO_DEC_SECURE_CODEC)
++            if (temp_native_handle != NULL)
++                temp_bufferHeader->pBuffer = (OMX_U8 *)temp_native_handle;
++            else if (pExynosComponent->codecType == HW_VIDEO_DEC_SECURE_CODEC)
+                 temp_bufferHeader->pBuffer = INT_TO_PTR(temp_buffer_fd);
+             else
+                 temp_bufferHeader->pBuffer = temp_buffer;
+@@ -275,6 +294,8 @@ OMX_ERRORTYPE Exynos_OMX_AllocateBuffer(
+     }
+ 
+     Exynos_OSAL_Free(temp_bufferHeader);
++    if (temp_native_handle != NULL)
++        native_handle_delete(temp_native_handle);
+     Exynos_OSAL_SharedMemory_Free(pVideoDec->hSharedMemory, temp_buffer);
+ 
+     ret = OMX_ErrorInsufficientResources;
+@@ -342,11 +363,15 @@ OMX_ERRORTYPE Exynos_OMX_FreeBuffer(
+                 if (pExynosPort->bufferStateAllocate[i] & BUFFER_STATE_ALLOCATED) {
+                     if ((pExynosComponent->codecType == HW_VIDEO_DEC_SECURE_CODEC) &&
+                         (nPortIndex == INPUT_PORT_INDEX)) {
+-                        /* caution : data loss */
+-                        int ionFD = PTR_TO_INT(pExynosPort->extendBufferHeader[i].OMXBufferHeader->pBuffer);
++                        OMX_PTR pSecureBuffer = pExynosPort->extendBufferHeader[i].OMXBufferHeader->pBuffer;
++                        int ionFD = Exynos_OMX_SecureInputBufferToFD(pVideoDec, pSecureBuffer);
+ 
+                         OMX_PTR mapBuffer = Exynos_OSAL_SharedMemory_IONToVirt(pVideoDec->hSharedMemory, ionFD);
+-                        Exynos_OSAL_SharedMemory_Free(pVideoDec->hSharedMemory, mapBuffer);
++                        Exynos_OSAL_SharedMemory_Free(pVideoDec->hSharedMemory, mapBuffer);  /* closes ionFD */
++
++                        /* the handle only wraps ionFD, which is closed above: delete, do not close */
++                        if ((pVideoDec->bAllocateNativeHandle == OMX_TRUE) && (pSecureBuffer != NULL))
++                            native_handle_delete((native_handle_t *)pSecureBuffer);
+                     } else {
+                         Exynos_OSAL_SharedMemory_Free(pVideoDec->hSharedMemory, pExynosPort->extendBufferHeader[i].OMXBufferHeader->pBuffer);
+                     }
+@@ -1546,6 +1571,41 @@ OMX_ERRORTYPE Exynos_OMX_VideoDecodeSetParameter(
+     }
+         break;
+ #endif
++    case OMX_IndexParamAllocateNativeHandle:
++    {
++        EXYNOS_OMX_VIDEODEC_COMPONENT           *pVideoDec  = (EXYNOS_OMX_VIDEODEC_COMPONENT *)pExynosComponent->hComponentHandle;
++        EXYNOS_OMX_PARAM_ALLOCATE_NATIVE_HANDLE *pParams    = (EXYNOS_OMX_PARAM_ALLOCATE_NATIVE_HANDLE *)ComponentParameterStructure;
++        EXYNOS_OMX_BASEPORT                     *pInputPort = &pExynosComponent->pExynosPort[INPUT_PORT_INDEX];
++
++        ret = Exynos_OMX_Check_SizeVersion(pParams, sizeof(EXYNOS_OMX_PARAM_ALLOCATE_NATIVE_HANDLE));
++        if (ret != OMX_ErrorNone)
++            goto EXIT;
++
++        if (pParams->nPortIndex >= pExynosComponent->portParam.nPorts) {
++            ret = OMX_ErrorBadPortIndex;
++            goto EXIT;
++        }
++
++        /* only the secure decoder's input buffers can be native handles; disabling is a no-op */
++        if ((pExynosComponent->codecType != HW_VIDEO_DEC_SECURE_CODEC) ||
++            (pParams->nPortIndex != INPUT_PORT_INDEX)) {
++            ret = (pParams->enable == OMX_TRUE)? OMX_ErrorUnsupportedSetting:OMX_ErrorNone;
++            goto EXIT;
++        }
++
++        /* the buffer type must not change while input buffers exist */
++        if (pInputPort->assignedBufferNum != 0) {
++            if (pVideoDec->bAllocateNativeHandle != pParams->enable)
++                ret = OMX_ErrorIncorrectStateOperation;
++            goto EXIT;
++        }
++
++        pVideoDec->bAllocateNativeHandle = (pParams->enable == OMX_TRUE)? OMX_TRUE:OMX_FALSE;
++        Exynos_OSAL_Log(EXYNOS_LOG_ESSENTIAL, "[%p][%s] allocateNativeHandle on input: %d",
++                                                pExynosComponent, __FUNCTION__, pVideoDec->bAllocateNativeHandle);
++        ret = OMX_ErrorNone;
++    }
++        break;
+     case OMX_IndexVendorNeedContigMemory:
+     {
+         EXYNOS_OMX_VIDEO_PARAM_PORTMEMTYPE  *pPortMemType    = (EXYNOS_OMX_VIDEO_PARAM_PORTMEMTYPE *)ComponentParameterStructure;
+@@ -1861,6 +1921,14 @@ OMX_ERRORTYPE Exynos_OMX_VideoDecodeGetExtensionIndex(
+         goto EXIT;
+     }
+ 
++    /* secure decoder only; without it the framework uses opaque (fd-as-pointer) secure buffers */
++    if ((pExynosComponent->codecType == HW_VIDEO_DEC_SECURE_CODEC) &&
++        (Exynos_OSAL_Strcmp(cParameterName, EXYNOS_INDEX_PARAM_ALLOCATE_NATIVE_HANDLE) == 0)) {
++        *pIndexType = (OMX_INDEXTYPE) OMX_IndexParamAllocateNativeHandle;
++        ret = OMX_ErrorNone;
++        goto EXIT;
++    }
++
+ #ifdef USE_QOS_CTRL
+     if (Exynos_OSAL_Strcmp(cParameterName, EXYNOS_INDEX_CONFIG_SET_QOS_RATIO) == 0) {
+         *pIndexType = (OMX_INDEXTYPE) OMX_IndexVendorSetQosRatio;
+diff --git a/component/video/dec/h264/Android.mk b/component/video/dec/h264/Android.mk
+index aee8691..18842ce 100644
+--- a/component/video/dec/h264/Android.mk
++++ b/component/video/dec/h264/Android.mk
+@@ -10,6 +10,7 @@ LOCAL_SRC_FILES := \
+ LOCAL_PRELINK_MODULE := false
+ LOCAL_MODULE := libOMX.Exynos.AVC.Decoder
+ LOCAL_MODULE_RELATIVE_PATH := omx
++LOCAL_VENDOR_MODULE := true
+ 
+ LOCAL_CFLAGS := \
+     -Wno-enum-conversion \
+diff --git a/include/exynos/Exynos_OMX_Def.h b/include/exynos/Exynos_OMX_Def.h
+index 4720a18..fa9eb07 100644
+--- a/include/exynos/Exynos_OMX_Def.h
++++ b/include/exynos/Exynos_OMX_Def.h
+@@ -134,6 +134,10 @@ typedef enum _EXYNOS_OMX_INDEXTYPE
+ #define EXYNOS_INDEX_PARAM_PREPEND_SPSPPS_TO_IDR "OMX.google.android.index.prependSPSPPSToIDRFrames"
+     OMX_IndexParamPrependSPSPPSToIDR            = 0x7F000015,
+ 
++    /* secure input buffers as native handles (fd in data[0]) instead of fds cast to pointers */
++#define EXYNOS_INDEX_PARAM_ALLOCATE_NATIVE_HANDLE "OMX.google.android.index.allocateNativeHandle"
++    OMX_IndexParamAllocateNativeHandle          = 0x7F000016,
++
+     /* HEVC Codec */
+ #ifdef USE_HEVC_SUPPORT
+ #define EXYNOS_INDEX_PARAM_VIDEO_HEVC_TYPE "OMX.SEC.index.VideoHevcType"
+@@ -373,6 +377,14 @@ typedef struct _EXYNOS_OMX_VIDEO_PARAM_PORTMEMTYPE {
+     OMX_BOOL        bNeedContigMem;
+ } EXYNOS_OMX_VIDEO_PARAM_PORTMEMTYPE;
+ 
++/* same layout as android::AllocateNativeHandleParams (media/hardware/HardwareAPI.h) */
++typedef struct _EXYNOS_OMX_PARAM_ALLOCATE_NATIVE_HANDLE {
++    OMX_U32         nSize;
++    OMX_VERSIONTYPE nVersion;
++    OMX_U32         nPortIndex;
++    OMX_BOOL        enable;
++} EXYNOS_OMX_PARAM_ALLOCATE_NATIVE_HANDLE;
++
+ typedef struct _EXYNOS_OMX_VIDEO_PARAM_DTSMODE {
+     OMX_U32         nSize;
+     OMX_VERSIONTYPE nVersion;

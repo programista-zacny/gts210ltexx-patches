@@ -1,0 +1,9 @@
+# LTE build only.
+# persist.ril.* is set and read by Samsung's RIL (libsec-ril.so); without a label it would be
+# default_prop, which vendor processes may not set.
+persist.ril.                u:object_r:vendor_radio_prop:s0
+# ril.cbd.* (boot_done, rfs_check_done, ...) is set by cbd and read by the RIL. The platform labels
+# ril.* radio_prop, which only the platform and the telephony HAL may set; a vendor label keeps
+# cbd out of it. The rest of ril.*, gsm.* and persist.radio.* stays radio_prop (set by rild as the
+# telephony HAL).
+ril.cbd.                    u:object_r:vendor_radio_prop:s0

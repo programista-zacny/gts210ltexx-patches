@@ -21,7 +21,32 @@ $(call inherit-product, device/samsung/gts2-common/device-common.mk)
 $(call inherit-product, $(SRC_TARGET_DIR)/product/aosp_base.mk)
 
 # Inherit some common LineageOS stuff.
+ifeq ($(WITH_LTE),true)
+# LTE build (WITH_LTE=true, see the LTE block in device.mk): mobile data and SMS, no voice calls.
+# This is common_full_tablet.mk without vendor/lineage/config/telephony.mk: its apns-conf.xml
+# module would install /product/etc/apns-conf.xml, which gts2-common already installs (its
+# Samsung APN list) with PRODUCT_COPY_FILES. Its other packages and properties are listed here,
+# except the ringtone and WITH_GMS_COMMS_SUITE (Google dialer and messages; voice). Not
+# common_full_tablet_wifionly.mk: its product overlay turns SMS and mobile data off.
+$(call inherit-product, vendor/lineage/config/common_mobile_full.mk)
+$(call inherit-product, vendor/lineage/config/tablet.mk)
+PRODUCT_PACKAGES += \
+    EmergencyInfo \
+    messaging \
+    sensitive_pn.xml \
+    Stk
+PRODUCT_PRODUCT_PROPERTIES += \
+    net.tethering.noprovisioning=true \
+    ro.com.android.mobiledata=false
+# AOSP telephony stack: carrier configuration, cell broadcasts (emergency alerts), the carrier
+# default app and the opportunistic network service on system, rild on vendor. Not
+# telephony_product.mk: Dialer, Contacts and IMS entitlement are for voice.
+$(call inherit-product, $(SRC_TARGET_DIR)/product/telephony_system.mk)
+$(call inherit-product, $(SRC_TARGET_DIR)/product/telephony_system_ext.mk)
+$(call inherit-product, $(SRC_TARGET_DIR)/product/telephony_vendor.mk)
+else
 $(call inherit-product, vendor/lineage/config/common_full_tablet_wifionly.mk)
+endif
 
 # ART garbage collector: this kernel has no userfaultfd (no CONFIG_USERFAULTFD in 3.10; the
 # backport in staging/backport-userfaultfd is not applied), so ART uses the concurrent copying

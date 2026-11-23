@@ -1,0 +1,95 @@
+From: programista-zacny <5969291+programista-zacny@users.noreply.github.com>
+Subject: [PATCH] libril: build the Samsung libril with ril.samsung_libril
+
+For the LTE build of the SM-T815 (WITH_LTE=true sets the soong config
+variable ril.samsung_libril, together with ril.use_aosp_rild): build
+the Samsung libril sources of hardware/samsung/ril/libril under this
+module name, so that the Soong rild links against them and loads
+Samsung's libsec-ril.so. The Samsung libril registers HIDL IRadio 1.0
+("slot1"); hardware/lineage/interfaces/radio/1.4/legacy wraps it as
+IRadio 1.4 for the framework.
+
+hardware/samsung has the same sources as a make module named libril
+(BOARD_PROVIDES_LIBRIL), which cannot be used next to this Soong module
+of the same name, and a Soong rild cannot link against a make module.
+
+With the variable set: the sources come from the filegroup
+//hardware/samsung:libril_samsung_srcs (patches/hardware_samsung/0001),
+hardware/samsung/ril/libril and hardware/samsung/ril/include (Samsung
+ril.h) come first in the include path, the OEM hook HAL library is
+linked, SAMSUNG_NEXT_GEN_MODEM is defined (as the make build does for
+BOARD_MODEM_TYPE ss333) and warnings are not errors. Without it the
+module is unchanged.
+---
+diff --git a/libril/Android.bp b/libril/Android.bp
+index 1a8cbec..141e032 100644
+--- a/libril/Android.bp
++++ b/libril/Android.bp
+@@ -33,13 +33,21 @@ license {
+ cc_library_shared {
+     name: "libril",
+     vendor: true,
+-    srcs: [
+-        "ril.cpp",
+-        "ril_event.cpp",
+-        "ril_service.cpp",
+-        "RilSapSocket.cpp",
+-        "sap_service.cpp",
+-    ],
++    // gts210ltexx: with the soong config variable ril.samsung_libril set to true, build the
++    // Samsung libril of hardware/samsung/ril/libril (HIDL IRadio 1.0, the Samsung request and
++    // response tables, the Samsung structure layout in hardware/samsung/ril/include) under this
++    // module name, for Samsung's legacy libsec-ril.so. The make module of the same name in
++    // hardware/samsung cannot be used: rild is a Soong module, and the two "libril" would clash.
++    srcs: select(soong_config_variable("ril", "samsung_libril"), {
++        true: ["//hardware/samsung:libril_samsung_srcs"],
++        default: [
++            "ril.cpp",
++            "ril_event.cpp",
++            "ril_service.cpp",
++            "RilSapSocket.cpp",
++            "sap_service.cpp",
++        ],
++    }),
+     shared_libs: [
+         "android.hardware.radio@1.0",
+         "android.hardware.radio@1.1",
+@@ -49,7 +57,10 @@ cc_library_shared {
+         "liblog",
+         "librilutils",
+         "libutils",
+-    ],
++    ] + select(soong_config_variable("ril", "samsung_libril"), {
++        true: ["android.hardware.radio.deprecated@1.0"],
++        default: [],
++    }),
+     static_libs: ["libprotobuf-c-nano-enable_malloc-32bit"],
+     cflags: [
+         "-Wall",
+@@ -69,8 +80,25 @@ cc_library_shared {
+             "-DOEM_HOOK_DISABLED",
+         ],
+         default: [],
++    }) + select(soong_config_variable("ril", "samsung_libril"), {
++        // SAMSUNG_NEXT_GEN_MODEM: what the make build sets for BOARD_MODEM_TYPE ss333 (Shannon).
++        // The Samsung sources were never built with -Werror.
++        true: [
++            "-DSAMSUNG_NEXT_GEN_MODEM",
++            "-Wno-error",
++        ],
++        default: [],
++    }),
++    // The Samsung directories come before the module directory (and before ril_headers), so
++    // that <ril_service.h>, <telephony/ril.h> and the other headers of the same names resolve
++    // to the Samsung ones.
++    include_dirs: ["external/nanopb-c"] + select(soong_config_variable("ril", "samsung_libril"), {
++        true: [
++            "hardware/samsung/ril/libril",
++            "hardware/samsung/ril/include",
++        ],
++        default: [],
+     }),
+-    include_dirs: ["external/nanopb-c"],
+     header_libs: [
+         "ril_headers",
+     ],

@@ -1,0 +1,27 @@
+#
+# system.prop for gts210ltexx, LTE build (WITH_LTE=true, see BoardConfig.mk).
+# The same as ../system.prop without "ro.radio.noril=yes" and "ro.carrier=wifi-only", plus the
+# telephony settings LineageOS 18.1 had on this tablet with the stock RIL. Keep the shared part
+# in step with ../system.prop.
+#
+
+# Display
+ro.surface_flinger.primary_display_orientation=ORIENTATION_270
+
+# Fingerprint
+ro.vendor.fingerprint.type=home
+ro.vendor.fingerprint.max_enrollments=4
+ro.vendor.fingerprint.uses_percentage_samples=true
+ro.vendor.fingerprint.cancel_on_enroll_completion=true
+
+# Telephony (data and SMS; no voice calls, see config_voice_capable in lte/overlay)
+# Preferred network: 9 = LTE/WCDMA/GSM.
+ro.telephony.default_network=9
+telephony.lteOnCdmaDevice=0
+ro.telephony.get_imsi_from_sim=true
+ro.ril.gprsclass=10
+ro.ril.hsxpa=1
+ro.ril.telephony.mqanelements=6
+ro.ril.force_eri_from_xml=true
+ro.ril.fast.dormancy.rule=0
+persist.radio.sib16_support=0

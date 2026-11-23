@@ -1,20 +1,18 @@
 Files under this directory are copied over the same path in lineage/ by
 scripts/prepare-tree.sh at the start of every build (rsync, no delete).
 
-vendor/partner_gms/GmsCore/GmsCore.apk
-    microG GmsCore 0.3.16.1.252432 (versionCode 252432033), from
-    https://github.com/microg/GmsCore/releases/download/v0.3.16.1.252432/com.google.android.gms-252432033.apk
-    sha256 5338d8a1141e8aa5845d64a41a39a666139fbe2e2499eead7b1f2ecd69980ccb, signer verified as microG
-    (certificate SHA-256 9bd06727e62796c0130eb6dab39b73157451582cbd138e86c468acc395d14165).
-    The APK is not kept in git: scripts/fetch-prebuilts.sh downloads it to this path and checks
-    the sha256 and, where apksigner is available, the signer.
-    Kept below the pinned 0.3.17.252432 (owner's decisions of 2026-11-06 and 2026-11-08). 0.3.16.1 is
-    0.3.16 plus the security fixes of 2026-09-29 (GHSA-rp4p-8x89-jhv5 and others), released the same
-    day as 0.3.17. Known issue: microG issue https://github.com/microg/GmsCore/issues/3853 (Aurora
-    Store login stuck on first login or fresh install) is reported for both 0.3.16.1 and 0.3.17; the
-    fix (commit 342c2801, 2026-10-26) is in no release yet. 0.3.16, which logged in fine, is kept in
-    dl/microg-0.3.16/ for a quick return.
-    To return to the pinned version: remove the GmsCore entry from scripts/fetch-prebuilts.sh and
-    the APK check from scripts/prepare-tree.sh, then delete this file and
-    lineage/vendor/partner_gms/GmsCore/GmsCore.apk; vendorsetup.sh then downloads the version
-    named in GmsCore/.version_code again.
+vendor/samsung/gts210ltexx-modem/proprietary/vendor/{bin/cbd,lib/*.so}
+    Stock modem userspace for the LTE build (WITH_LTE=true, see the LTE block in
+    device/gts210ltexx/device.mk, which installs these files to /vendor with PRODUCT_COPY_FILES).
+    Unmodified copies from tools/stock-T815/T815XXU2CRH1/modem/ (Samsung firmware T815XXU2CRH1,
+    the firmware of the CP image in the RADIO partition; provenance and sha256 in MANIFEST.txt
+    there): bin/cbd is /sbin/cbd, lib/ is /system/lib/{libsec-ril,libfloatingfeature,
+    libsecnativefeature,libprotobuf-cpp-full}.so.
+        cbd                      91210237db3f59c6e7e3bd694c0d567c7024edee93db8827946f6df37f8bb2f9
+        libsec-ril.so            09a08d07f76d89da8cca1b840f1405ad084ca05463519886effd983203252cd1
+        libfloatingfeature.so    b837b0695017ed38f085850bf2c5b324f52189f2f51cf9337d87c72f69d63585
+        libsecnativefeature.so   0e3b5868832940e998316eec2053885bb7051b924eb8b1ecae4a23d8512c44ab
+        libprotobuf-cpp-full.so  0bee42215df983e3ec44a9805fc258bbec691380226d89ef2b8892dfc521e098
+    Samsung blobs: not published (publish/export.sh copies only this README from
+    tree-overrides/ and refuses to export if any of these files turns up in the publication
+    copies). They are a new directory, not an override: nothing else is at that path.

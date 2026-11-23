@@ -1,0 +1,70 @@
+# LTE modem (Shannon 333 "ss333", driver modem_v1) of the SM-T815: CP boot daemon and the nodes
+# it and Samsung's RIL use. Installed to /vendor/etc/init only by the LTE build (WITH_LTE=true,
+# device.mk); the Wi-Fi build has neither this file nor cbd, rild and the radio HAL.
+#
+# Services of the radio stack (all class main or hal, started at boot):
+#   cpboot-daemon             here: stock cbd boots the CP (TOC, SPI boot, MIPI-LLI, MAIN, NV)
+#   vendor.ril-daemon         hardware/ril/rild/rild.rc: rild + Samsung libril + libsec-ril.so
+#   vendor.radio-1-4-legacy   hardware/lineage/interfaces/radio/1.4/legacy: IRadio 1.4 for the
+#                             framework, on top of rild's IRadio 1.0
+#
+# /efs is mounted (with fsck) by mount_all in "on fs", before class main starts. cbd opens the
+# existing /efs/nv_data.bin; its SELinux domain may not create files in /efs (lte/sepolicy), so a
+# missing nv_data.bin makes the CP boot fail instead of cbd writing a blank NV file.
+
+on init
+    # cbd reads "dev/mipi-lli/lli_control", relative to its working directory. Services started
+    # by init run in /, so this is /dev/mipi-lli/lli_control (the stock firmware made the same
+    # link; on stage 1, 2026-11-11, cbd ran from / with this link and the CP reached ONLINE).
+    symlink /sys/devices/10f24000.mipi-lli /dev/mipi-lli
+    # The modem image, read by name by Samsung's RIL (stock link).
+    symlink /dev/block/platform/15540000.dwmmc0/by-name/RADIO /dev/mbin0
+
+    # The CP diagnostic channel. DIAG can read and write the modem's NV items; nothing in this
+    # build uses it, so keep it to root only (ueventd made it system:radio 0660 like the other
+    # umts nodes).
+    chown root root /dev/umts_dm0
+    chmod 0600 /dev/umts_dm0
+
+    # Not taken over from the stock init.baseband.rc:
+    # - "write /sys/module/link_device_lli/parameters/pm_enable 0": the parameter is read-only
+    #   (S_IRUGO) in this kernel, and link power management must stay on for suspend;
+    # - "onrestart restart cpboot-daemon" of the stock rild: restarting cbd power-cycles the CP,
+    #   and a crash-looping rild would then keep the CP in its first boot seconds, which must not
+    #   be interrupted.
+
+on fs
+    # Samsung's RIL sets the wake time of the packet data driver.
+    chown radio radio /sys/devices/virtual/misc/multipdp/waketime
+    chmod 0660 /sys/devices/virtual/misc/multipdp/waketime
+
+# CP Boot Daemon. Stock: "/sbin/cbd -d -t ss333 -b s -m l -p 13" as root with seclabel u:r:cbd;
+# LineageOS 18.1 ran the same binary as radio. -d daemon, -t ss333 modem, -b s SPI boot link,
+# -m l MIPI-LLI main link, -p 13 the RADIO partition (/dev/block/mmcblk0p13).
+service cpboot-daemon /vendor/bin/cbd -d -t ss333 -b s -m l -p 13
+    class main
+    user radio
+    group radio cache inet misc log wakelock
+    capabilities BLOCK_SUSPEND
+
+# Switch the modem off without reflashing (for example to compare battery drain):
+#   setprop persist.vendor.radio.cpboot disable   (as root), then reboot
+# and back with "setprop persist.vendor.radio.cpboot enable" and a reboot. Checked once, at
+# "boot", before class main starts, so cbd is never stopped while it is booting the CP. The stock
+# firmware had the same switch as persist.sys.cpboot. The radio HAL then waits for rild forever,
+# and the phone process sees no radio.
+on boot && property:persist.vendor.radio.cpboot=disable
+    stop vendor.ril-daemon
+    stop cpboot-daemon
+
+# gpsd, started through /system/bin/gpsd (a link to /vendor/bin/gpsd, lte/gpsd/Android.bp) instead
+# of gts2-common's /vendor/bin/gpsd: libsec-ril.so only accepts OEM clients whose argv[0] is in its
+# whitelist, and for uid gps that is "/system/bin/gpsd" (stock path). Otherwise identical to
+# gts2-common's service (init.universal5433.rc). Without this, gpsd's connections to rild were
+# refused and it retried every 20 s holding a wakelock (build 20).
+service gpsd /system/bin/gpsd -c /vendor/etc/gps.xml
+    override
+    class main
+    user gps
+    group system inet net_raw
+    ioprio be 0
