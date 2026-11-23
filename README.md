@@ -394,7 +394,9 @@ These were analysed, and most were prepared as patches, but are left out of this
 
 - **rINanDO** for [gts210wifi-patches](https://github.com/rINanDO/gts210wifi-patches) and the
   Exynos 5433 device, kernel, hardware and vendor forks that this build stands on.
-- **Jan Huijsmans** and **Christopher N. Hesse** for the original T815 device tree.
+- **Christopher N. Hesse** ([raymanfx](https://github.com/raymanfx)) and **Jan Huijsmans**
+  ([KoffieNu](https://github.com/KoffieNu)) for the
+  [original T815 device tree](https://github.com/LineageOS/android_device_samsung_gts210ltexx).
 - [LineageOS](https://lineageos.org), [microG](https://microg.org),
   [Aurora OSS](https://gitlab.com/AuroraOSS) (Aurora Store) and [F-Droid](https://f-droid.org).
 - [lineageos4microg](https://github.com/lineageos4microg) for `android_vendor_partner_gms`.
