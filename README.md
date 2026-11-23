@@ -246,7 +246,9 @@ produced build 22 (`manifests/build10-pinned.xml` the one of builds 10-21; betwe
 this repository changed). It is
 for reproducibility and for GPL source correspondence (the kernel source of a build is
 rINanDO's kernel fork at the recorded revision plus `patches/kernel/` and
-`kernel/lineage_gts210ltexx_defconfig`). For the 28 projects that rINanDO's `apply.sh` patches,
+`kernel/lineage_gts210ltexx_defconfig`; the same tree, ready to use, is
+https://github.com/programista-zacny/android_kernel_samsung_universal5433, branch `lineage-24.0`,
+tag per release, e.g. `build22`). For the 28 projects that rINanDO's `apply.sh` patches,
 it records the upstream commit the series is applied to. It already contains the local
 manifests, so after step 1 clone rINanDO's patches as in step 2 but do not copy the local
 manifests; instead:
