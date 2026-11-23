@@ -1,12 +1,12 @@
 [
   {
-    "datetime": 1794263420,
+    "datetime": 1795428002,
     "files": [
       {
-        "filename": "lineage-24.0-20261109-UNOFFICIAL-gts210ltexx.zip",
-        "sha256": "63782b597a1a67056a9e8d4ffbb32978d398c752d10c4ea99576b9cdda339516",
-        "size": 937779224,
-        "url": "https://github.com/programista-zacny/gts210ltexx-patches/releases/download/build17/lineage-24.0-20261109-UNOFFICIAL-gts210ltexx.zip",
+        "filename": "lineage-24.0-20261123-UNOFFICIAL-gts210ltexx.zip",
+        "sha256": "c9a6f11f2a2f7d03c16cb03ccdac3798e9054a7189487569a12dcdb5c0d177d5",
+        "size": 953424806,
+        "url": "https://github.com/programista-zacny/gts210ltexx-patches/releases/download/build22/lineage-24.0-20261123-UNOFFICIAL-gts210ltexx.zip",
         "os_patch_level": "2026-11-01",
         "os_sdk_level": 37
       }
